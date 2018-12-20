@@ -142,9 +142,19 @@ impl TwinClient {
 			keep_alive,
 		);
 
-		// These can only fail if `inner` has been dropped, which is not the case here
-		let publish_handle = inner.publish_handle().expect("couldn't get publish handle");
-		let update_subscription_handle = inner.update_subscription_handle().expect("couldn't get subscription update handle");
+		let publish_handle = match inner.publish_handle() {
+			Ok(publish_handle) => publish_handle,
+
+			// This can only happen if `inner` has been shut down
+			Err(mqtt::PublishError::ClientDoesNotExist) => unreachable!(),
+		};
+
+		let update_subscription_handle = match inner.update_subscription_handle() {
+			Ok(update_subscription_handle) => update_subscription_handle,
+
+			// This can only happen if `inner` has been shut down
+			Err(mqtt::UpdateSubscriptionError::ClientDoesNotExist) => unreachable!(),
+		};
 
 		Ok(TwinClient {
 			inner,
@@ -185,14 +195,17 @@ impl Stream for TwinClient {
 					self.state = State::WaitingForSubscription(Box::new(response_subscription.join(patches_subscription)));
 				},
 
-				// The subscription can only fail if `self.inner` has been dropped, which is not the case here
-				State::WaitingForSubscription(f) => match f.poll().expect("subscription should not fail") {
-					futures::Async::Ready(((), ())) => self.state = State::BeginSendingGetRequest,
-					futures::Async::NotReady => match self.inner.poll().map_err(Error::MqttClient)? {
+				State::WaitingForSubscription(f) => match f.poll() {
+					Ok(futures::Async::Ready(((), ()))) => self.state = State::BeginSendingGetRequest,
+
+					Ok(futures::Async::NotReady) => match self.inner.poll().map_err(Error::MqttClient)? {
 						futures::Async::Ready(Some(_)) => (), // Ignore all events until subscription succeeds
 						futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
 						futures::Async::NotReady => return Ok(futures::Async::NotReady),
 					},
+
+					// The subscription can only fail if `self.inner` has shut down, which is not the case here
+					Err(mqtt::UpdateSubscriptionError::ClientDoesNotExist) => unreachable!(),
 				},
 
 				State::BeginBackOff => match self.current_back_off {
@@ -222,14 +235,17 @@ impl Stream for TwinClient {
 						payload: vec![],
 					}))),
 
-				// The publish can only fail if `self.inner` has been dropped, which is not the case here
-				State::EndSendingGetRequest(f) => match f.poll().expect("publish should not fail") {
-					futures::Async::Ready(()) => self.state = State::WaitingForGetResponse,
-					futures::Async::NotReady => match self.inner.poll().map_err(Error::MqttClient)? {
+				State::EndSendingGetRequest(f) => match f.poll() {
+					Ok(futures::Async::Ready(())) => self.state = State::WaitingForGetResponse,
+
+					Ok(futures::Async::NotReady) => match self.inner.poll().map_err(Error::MqttClient)? {
 						futures::Async::Ready(Some(_)) => (), // Ignore all events until publish succeeds
 						futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
 						futures::Async::NotReady => return Ok(futures::Async::NotReady),
 					},
+
+					// The publish can only fail if `self.inner` has shut down, which is not the case here
+					Err(mqtt::PublishError::ClientDoesNotExist) => unreachable!(),
 				},
 
 				State::WaitingForGetResponse => match self.inner.poll().map_err(Error::MqttClient)? {
