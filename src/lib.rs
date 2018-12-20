@@ -2,7 +2,7 @@
  * This crate contains types related to the Azure IoT MQTT server.
  */
 
-#![deny(unused_extern_crates, warnings)]
+#![deny(rust_2018_idioms, warnings)]
 #![deny(clippy::all, clippy::pedantic)]
 #![allow(
 	clippy::default_trait_access,
@@ -26,7 +26,7 @@ pub enum Error {
 }
 
 impl std::fmt::Display for Error {
-	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
 			Error::MqttClient(err) => write!(f, "MQTT client encountered an error: {}", err),
 			Error::ResolveIotHubHostname(Some(err)) => write!(f, "could not resolve Azure IoT Hub hostname: {}", err),
@@ -36,7 +36,7 @@ impl std::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {
-	fn source(&self) -> Option<&(std::error::Error + 'static)> {
+	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
 		match self {
 			Error::MqttClient(err) => Some(err),
 			Error::ResolveIotHubHostname(Some(err)) => Some(err),
@@ -64,11 +64,11 @@ pub struct TwinClient {
 
 enum State {
 	BeginSubscription,
-	WaitingForSubscription(Box<Future<Item = ((), ()), Error = mqtt::UpdateSubscriptionError> + Send>),
+	WaitingForSubscription(Box<dyn Future<Item = ((), ()), Error = mqtt::UpdateSubscriptionError> + Send>),
 	BeginBackOff,
 	EndBackOff(tokio::timer::Delay),
 	BeginSendingGetRequest,
-	EndSendingGetRequest(Box<Future<Item = (), Error = mqtt::PublishError> + Send>),
+	EndSendingGetRequest(Box<dyn Future<Item = (), Error = mqtt::PublishError> + Send>),
 	WaitingForGetResponse,
 	HaveGetResponse,
 }
@@ -318,7 +318,7 @@ impl Stream for TwinClient {
 }
 
 impl std::fmt::Debug for State {
-	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
 			State::BeginSubscription => f.debug_struct("BeginSubscription").finish(),
 			State::WaitingForSubscription(_) => f.debug_struct("WaitingForSubscription").finish(),
@@ -341,7 +341,7 @@ pub struct StreamSource {
 
 impl mqtt::IoSource for StreamSource {
 	type Io = tokio_tls::TlsStream<tokio_io_timeout::TimeoutStream<tokio::net::TcpStream>>;
-	type Future = Box<Future<Item = Self::Io, Error = std::io::Error> + Send>;
+	type Future = Box<dyn Future<Item = Self::Io, Error = std::io::Error> + Send>;
 
 	fn connect(&mut self) -> Self::Future {
 		let iothub_hostname = self.iothub_hostname.clone();
