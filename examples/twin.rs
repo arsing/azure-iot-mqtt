@@ -36,7 +36,7 @@ struct Options {
 }
 
 fn main() {
-	env_logger::Builder::from_env("AZURE_IOT_MQTT_LOG").init();
+	env_logger::Builder::from_env(env_logger::Env::new().filter_or("AZURE_IOT_MQTT_LOG", "mqtt=debug,mqtt::logging=trace,twin=info")).init();
 
 	let Options {
 		device_id,
