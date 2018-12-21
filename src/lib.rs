@@ -56,6 +56,7 @@ pub struct TwinClient {
 	publish_handle: mqtt::PublishHandle,
 	update_subscription_handle: mqtt::UpdateSubscriptionHandle,
 
+	keep_alive: std::time::Duration,
 	max_back_off: std::time::Duration,
 	current_back_off: std::time::Duration,
 
@@ -69,7 +70,7 @@ enum State {
 	EndBackOff(tokio::timer::Delay),
 	BeginSendingGetRequest,
 	EndSendingGetRequest(Box<dyn Future<Item = (), Error = mqtt::PublishError> + Send>),
-	WaitingForGetResponse,
+	WaitingForGetResponse(tokio::timer::Delay),
 	HaveGetResponse,
 }
 
@@ -161,6 +162,7 @@ impl TwinClient {
 			publish_handle,
 			update_subscription_handle,
 
+			keep_alive,
 			max_back_off,
 			current_back_off: std::time::Duration::from_secs(0),
 
@@ -240,7 +242,10 @@ impl Stream for TwinClient {
 					}))),
 
 				State::EndSendingGetRequest(f) => match f.poll() {
-					Ok(futures::Async::Ready(())) => self.state = State::WaitingForGetResponse,
+					Ok(futures::Async::Ready(())) => {
+						let deadline = std::time::Instant::now() + 2 * self.keep_alive;
+						self.state = State::WaitingForGetResponse(tokio::timer::Delay::new(deadline));
+					},
 
 					Ok(futures::Async::NotReady) => match self.inner.poll().map_err(Error::MqttClient)? {
 						futures::Async::Ready(Some(_)) => (), // Ignore all events until publish succeeds
@@ -252,48 +257,62 @@ impl Stream for TwinClient {
 					Err(mqtt::PublishError::ClientDoesNotExist) => unreachable!(),
 				},
 
-				State::WaitingForGetResponse => match self.inner.poll().map_err(Error::MqttClient)? {
-					futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) =>
-						self.state = State::BeginSendingGetRequest,
-
-					futures::Async::Ready(Some(mqtt::Event::Publication(publication))) =>
-						if let Some(captures) = RESPONSE_REGEX.captures(&publication.topic_name) {
-							let status: usize = match captures[1].parse() {
-								Ok(status) => status,
-								Err(err) => {
-									log::warn!("could not parse status from publication topic {:?}: {}", publication.topic_name, err);
-									self.state = State::BeginBackOff;
-									continue;
-								},
-							};
-
-							match status {
-								200 => {
-									self.current_back_off = std::time::Duration::from_secs(0);
-
-									let twin_state = match serde_json::from_slice(&publication.payload) {
-										Ok(twin_state) => twin_state,
-										Err(err) => {
-											log::warn!("could not deserialize GET response: {}", err);
-											self.state = State::BeginBackOff;
-											continue;
-										},
-									};
-
-									self.state = State::HaveGetResponse;
-									return Ok(futures::Async::Ready(Some(TwinMessage::Initial(twin_state))));
-								},
-
-								status => {
-									log::warn!("IoT Hub returned status {} in response to initial GET request.", status);
-									self.state = State::BeginBackOff;
-								},
-							}
+				State::WaitingForGetResponse(timer) => {
+					match self.inner.poll().map_err(Error::MqttClient)? {
+						futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => {
+							self.state = State::BeginSendingGetRequest;
+							continue;
 						},
 
-					futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
+						futures::Async::Ready(Some(mqtt::Event::Publication(publication))) =>
+							if let Some(captures) = RESPONSE_REGEX.captures(&publication.topic_name) {
+								let status: usize = match captures[1].parse() {
+									Ok(status) => status,
+									Err(err) => {
+										log::warn!("could not parse status from publication topic {:?}: {}", publication.topic_name, err);
+										self.state = State::BeginBackOff;
+										continue;
+									},
+								};
 
-					futures::Async::NotReady => return Ok(futures::Async::NotReady),
+								match status {
+									200 => {
+										self.current_back_off = std::time::Duration::from_secs(0);
+
+										let twin_state = match serde_json::from_slice(&publication.payload) {
+											Ok(twin_state) => twin_state,
+											Err(err) => {
+												log::warn!("could not deserialize GET response: {}", err);
+												self.state = State::BeginBackOff;
+												continue;
+											},
+										};
+
+										self.state = State::HaveGetResponse;
+										return Ok(futures::Async::Ready(Some(TwinMessage::Initial(twin_state))));
+									},
+
+									status => {
+										log::warn!("IoT Hub returned status {} in response to initial GET request.", status);
+										self.state = State::BeginBackOff;
+										continue;
+									},
+								}
+							},
+
+						futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
+
+						futures::Async::NotReady => (),
+					}
+
+					match timer.poll().expect("could not poll GET response timer") {
+						futures::Async::Ready(()) => {
+							log::warn!("timed out waiting for GET response");
+							self.state = State::BeginSendingGetRequest;
+						},
+
+						futures::Async::NotReady => return Ok(futures::Async::NotReady),
+					}
 				},
 
 				State::HaveGetResponse => match self.inner.poll().map_err(Error::MqttClient)? {
@@ -331,7 +350,7 @@ impl std::fmt::Debug for State {
 			State::EndBackOff(_) => f.debug_struct("EndBackOff").finish(),
 			State::BeginSendingGetRequest => f.debug_struct("BeginSendingGetRequest").finish(),
 			State::EndSendingGetRequest(_) => f.debug_struct("EndSendingGetRequest").finish(),
-			State::WaitingForGetResponse => f.debug_struct("WaitingForGetResponse").finish(),
+			State::WaitingForGetResponse(_) => f.debug_struct("WaitingForGetResponse").finish(),
 			State::HaveGetResponse => f.debug_struct("HaveGetResponse").finish(),
 		}
 	}
