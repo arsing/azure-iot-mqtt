@@ -201,8 +201,14 @@ impl Stream for TwinClient {
 					Ok(futures::Async::Ready(((), ()))) => self.state = State::BeginSendingGetRequest,
 
 					Ok(futures::Async::NotReady) => match self.inner.poll().map_err(Error::MqttClient)? {
-						futures::Async::Ready(Some(_)) => (), // Ignore all events until subscription succeeds
+						// Inner client will resubscribe as necessary, so there's nothing for this client to do
+						futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => (),
+
+						futures::Async::Ready(Some(mqtt::Event::Publication(publication))) =>
+							log::debug!("Discarding PUBLISH packet with topic {:?} because we haven't subscribed yet", publication.topic_name),
+
 						futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
+
 						futures::Async::NotReady => return Ok(futures::Async::NotReady),
 					},
 
@@ -227,8 +233,14 @@ impl Stream for TwinClient {
 				State::EndBackOff(back_off_timer) => match back_off_timer.poll().expect("could not poll back-off timer") {
 					futures::Async::Ready(()) => self.state = State::BeginSendingGetRequest,
 					futures::Async::NotReady => match self.inner.poll().map_err(Error::MqttClient)? {
-						futures::Async::Ready(Some(_)) => (), // Ignore all events
+						// Inner client will resubscribe as necessary, so there's nothing for this client to do
+						futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => (),
+
+						futures::Async::Ready(Some(mqtt::Event::Publication(publication))) =>
+							log::debug!("Discarding PUBLISH packet with topic {:?} because we're still backing off before making a GET request", publication.topic_name),
+
 						futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
+
 						futures::Async::NotReady => return Ok(futures::Async::NotReady),
 					},
 				},
@@ -248,8 +260,14 @@ impl Stream for TwinClient {
 					},
 
 					Ok(futures::Async::NotReady) => match self.inner.poll().map_err(Error::MqttClient)? {
-						futures::Async::Ready(Some(_)) => (), // Ignore all events until publish succeeds
+						// Inner client hasn't sent the GET request yet, so there's nothing for this client to do
+						futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => (),
+
+						futures::Async::Ready(Some(mqtt::Event::Publication(publication))) =>
+							log::debug!("Discarding PUBLISH packet with topic {:?} because we haven't sent the GET request yet", publication.topic_name),
+
 						futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
+
 						futures::Async::NotReady => return Ok(futures::Async::NotReady),
 					},
 
@@ -260,6 +278,7 @@ impl Stream for TwinClient {
 				State::WaitingForGetResponse(timer) => {
 					match self.inner.poll().map_err(Error::MqttClient)? {
 						futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => {
+							log::warn!("Connection reset while waiting for GET response. Resending GET request...");
 							self.state = State::BeginSendingGetRequest;
 							continue;
 						},
@@ -298,6 +317,9 @@ impl Stream for TwinClient {
 										continue;
 									},
 								}
+							}
+							else {
+								log::debug!("Discarding PUBLISH packet with topic {:?} because it's not the GET response", publication.topic_name);
 							},
 
 						futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
@@ -316,7 +338,10 @@ impl Stream for TwinClient {
 				},
 
 				State::HaveGetResponse => match self.inner.poll().map_err(Error::MqttClient)? {
-					futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => self.state = State::BeginSendingGetRequest,
+					futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => {
+						log::warn!("Connection reset. Resending GET request...");
+						self.state = State::BeginSendingGetRequest;
+					},
 
 					futures::Async::Ready(Some(mqtt::Event::Publication(publication))) =>
 						if publication.topic_name.starts_with("$iothub/twin/PATCH/properties/desired/") {
@@ -330,6 +355,9 @@ impl Stream for TwinClient {
 							};
 
 							return Ok(futures::Async::Ready(Some(TwinMessage::Patch(twin_properties))));
+						}
+						else {
+							log::debug!("Discarding PUBLISH packet with topic {:?} because it's not a PATCH response", publication.topic_name);
 						},
 
 					futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
