@@ -299,18 +299,19 @@ impl Stream for TwinClient {
 				State::HaveGetResponse => match self.inner.poll().map_err(Error::MqttClient)? {
 					futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => self.state = State::BeginSendingGetRequest,
 
-					futures::Async::Ready(Some(mqtt::Event::Publication(publication))) => {
-						let twin_properties = match serde_json::from_slice(&publication.payload) {
-							Ok(twin_properties) => twin_properties,
-							Err(err) => {
-								log::warn!("could not deserialize PATCH response: {}", err);
-								self.state = State::BeginBackOff;
-								continue;
-							},
-						};
+					futures::Async::Ready(Some(mqtt::Event::Publication(publication))) =>
+						if publication.topic_name.starts_with("$iothub/twin/PATCH/properties/desired/") {
+							let twin_properties = match serde_json::from_slice(&publication.payload) {
+								Ok(twin_properties) => twin_properties,
+								Err(err) => {
+									log::warn!("could not deserialize PATCH response: {}", err);
+									self.state = State::BeginBackOff;
+									continue;
+								},
+							};
 
-						return Ok(futures::Async::Ready(Some(TwinMessage::Patch(twin_properties))));
-					},
+							return Ok(futures::Async::Ready(Some(TwinMessage::Patch(twin_properties))));
+						},
 
 					futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
 
