@@ -224,7 +224,11 @@ impl Stream for TwinClient {
 
 				State::EndBackOff(back_off_timer) => match back_off_timer.poll().expect("could not poll back-off timer") {
 					futures::Async::Ready(()) => self.state = State::BeginSendingGetRequest,
-					futures::Async::NotReady => return Ok(futures::Async::NotReady),
+					futures::Async::NotReady => match self.inner.poll().map_err(Error::MqttClient)? {
+						futures::Async::Ready(Some(_)) => (), // Ignore all events
+						futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
+						futures::Async::NotReady => return Ok(futures::Async::NotReady),
+					},
 				},
 
 				State::BeginSendingGetRequest =>
