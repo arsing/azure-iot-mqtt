@@ -1,6 +1,6 @@
 // Example:
 //
-//     cargo run --example twin -- --device-id <> --iothub-hostname <> --sas-token <> --will 'azure-iot-mqtt-twin-client client unexpectedly disconnected'
+//     cargo run --example twin -- --device-id <> --iothub-hostname <> --sas-token <> --use-websocket --will 'azure-iot-mqtt-twin-client client unexpectedly disconnected'
 
 use futures::{ Future, Stream };
 
@@ -14,6 +14,9 @@ struct Options {
 
 	#[structopt(help = "SAS token", long = "sas-token")]
 	sas_token: String,
+
+	#[structopt(help = "Whether to use websockets or bare TLS to connect to the Iot Hub", long = "use-websocket")]
+	use_websocket: bool,
 
 	#[structopt(help = "Will message to publish if this client disconnects unexpectedly", long = "will")]
 	will: Option<String>,
@@ -42,6 +45,7 @@ fn main() {
 		device_id,
 		iothub_hostname,
 		sas_token,
+		use_websocket,
 		will,
 		max_back_off,
 		keep_alive,
@@ -53,6 +57,7 @@ fn main() {
 		iothub_hostname,
 		device_id,
 		sas_token,
+		if use_websocket { azure_iot_mqtt::Transport::WebSocket } else { azure_iot_mqtt::Transport::Tcp },
 
 		will.map(String::into_bytes),
 

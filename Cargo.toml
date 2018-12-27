@@ -17,6 +17,8 @@ serde_json = "1.0"
 tokio = "0.1"
 tokio-io-timeout = "0.3"
 tokio-tls = "0.2"
+tungstenite = "0.6"
+url = "1.7"
 
 [dev-dependencies]
 env_logger = "0.6"
