@@ -1,6 +1,6 @@
 // Example:
 //
-//     cargo run --example twin -- --device-id <> --iothub-hostname <> --sas-token <> --use-websocket --will 'azure-iot-mqtt-twin-client client unexpectedly disconnected'
+//     cargo run --example device -- --device-id <> --iothub-hostname <> --sas-token <> --use-websocket --will 'azure-iot-mqtt client unexpectedly disconnected'
 
 use futures::{ Future, Stream };
 
@@ -39,7 +39,7 @@ struct Options {
 }
 
 fn main() {
-	env_logger::Builder::from_env(env_logger::Env::new().filter_or("AZURE_IOT_MQTT_LOG", "mqtt=debug,mqtt::logging=trace,twin=info")).init();
+	env_logger::Builder::from_env(env_logger::Env::new().filter_or("AZURE_IOT_MQTT_LOG", "mqtt=debug,mqtt::logging=trace,azure_iot_mqtt=debug,device=info")).init();
 
 	let Options {
 		device_id,
@@ -53,7 +53,7 @@ fn main() {
 
 	let mut runtime = tokio::runtime::Runtime::new().expect("couldn't initialize tokio runtime");
 
-	let twin_client = azure_iot_mqtt::TwinClient::new(
+	let client = azure_iot_mqtt::Client::new(
 		iothub_hostname,
 		device_id,
 		sas_token,
@@ -63,9 +63,9 @@ fn main() {
 
 		max_back_off,
 		keep_alive,
-	).expect("could not create twin client");
+	).expect("could not create client");
 
-	let shutdown_handle = twin_client.inner().shutdown_handle().expect("couldn't get shutdown handle");
+	let shutdown_handle = client.inner().shutdown_handle().expect("couldn't get shutdown handle");
 	runtime.spawn(
 		tokio_signal::ctrl_c()
 		.flatten_stream()
@@ -76,13 +76,13 @@ fn main() {
 			Ok(())
 		}));
 
-	let f = twin_client.for_each(|twin_message| {
-		log::info!("received twin message {:?}", twin_message);
+	let f = client.for_each(|message| {
+		log::info!("received message {:?}", message);
 
 		Ok(())
 	});
 
-	runtime.block_on(f).expect("azure-iot-mqtt-twin-client client failed");
+	runtime.block_on(f).expect("azure-iot-mqtt client failed");
 }
 
 fn duration_from_secs_str(s: &str) -> Result<std::time::Duration, <u64 as std::str::FromStr>::Err> {

@@ -48,13 +48,13 @@ impl std::error::Error for Error {
 	}
 }
 
-/// A client for getting device twin properties.
+/// A client for the Azure IoT Hub MQTT protocol.
 ///
-/// A `TwinClient` is a [`Stream`] of [`TwinMessage`]s.
+/// A `Client` is a [`Stream`] of [`Message`]s. These messages contain twin properties and cloud-to-device communications.
 ///
-/// It automatically reconnects if the connection to the server is broken. Each reconnection will yield one [`TwinMessage::Initial`] message
-/// and zero or more [`TwinMessage::Patch`] messages.
-pub struct TwinClient {
+/// It automatically reconnects if the connection to the server is broken. Each reconnection will yield one [`Message::TwinInitial`] message,
+/// zero or more [`Message::TwinPatch`] messages and zero or more [`Message::CloudToDevice`] messages.
+pub struct Client {
 	inner: mqtt::Client<IoSource>,
 	publish_handle: mqtt::PublishHandle,
 	update_subscription_handle: mqtt::UpdateSubscriptionHandle,
@@ -62,13 +62,14 @@ pub struct TwinClient {
 	keep_alive: std::time::Duration,
 	max_back_off: std::time::Duration,
 	current_back_off: std::time::Duration,
+	c2d_prefix: String,
 
 	state: State,
 }
 
 enum State {
 	BeginSubscription,
-	WaitingForSubscription(Box<dyn Future<Item = ((), ()), Error = mqtt::UpdateSubscriptionError> + Send>),
+	WaitingForSubscription(Box<dyn Future<Item = ((), (), ()), Error = mqtt::UpdateSubscriptionError> + Send>),
 	BeginBackOff,
 	EndBackOff(tokio::timer::Delay),
 	BeginSendingGetRequest,
@@ -79,8 +80,8 @@ enum State {
 	},
 }
 
-impl TwinClient {
-	/// Creates a new `TwinClient`
+impl Client {
+	/// Creates a new `Client`
 	///
 	/// * `iothub_hostname`
 	///
@@ -142,6 +143,9 @@ impl TwinClient {
 			retain: false,
 			payload: will.unwrap_or_else(Vec::new),
 		};
+
+		let c2d_prefix = format!("devices/{}/messages/devicebound/", device_id);
+
 		let client_id = device_id;
 
 		let io_source_extra = match transport {
@@ -190,7 +194,7 @@ impl TwinClient {
 			Err(mqtt::UpdateSubscriptionError::ClientDoesNotExist) => unreachable!(),
 		};
 
-		Ok(TwinClient {
+		Ok(Client {
 			inner,
 			publish_handle,
 			update_subscription_handle,
@@ -198,6 +202,7 @@ impl TwinClient {
 			keep_alive,
 			max_back_off,
 			current_back_off: std::time::Duration::from_secs(0),
+			c2d_prefix,
 
 			state: State::BeginSubscription,
 		})
@@ -209,8 +214,8 @@ impl TwinClient {
 	}
 }
 
-impl Stream for TwinClient {
-	type Item = TwinMessage;
+impl Stream for Client {
+	type Item = Message;
 	type Error = Error;
 
 	fn poll(&mut self) -> futures::Poll<Option<Self::Item>, Self::Error> {
@@ -219,19 +224,23 @@ impl Stream for TwinClient {
 
 			match &mut self.state {
 				State::BeginSubscription => {
-					let response_subscription = self.update_subscription_handle.subscribe(mqtt::proto::SubscribeTo {
+					let twin_get_subscription = self.update_subscription_handle.subscribe(mqtt::proto::SubscribeTo {
 						topic_filter: "$iothub/twin/res/#".to_string(),
 						qos: mqtt::proto::QoS::AtMostOnce,
 					});
-					let patches_subscription = self.update_subscription_handle.subscribe(mqtt::proto::SubscribeTo {
+					let twin_patches_subscription = self.update_subscription_handle.subscribe(mqtt::proto::SubscribeTo {
 						topic_filter: "$iothub/twin/PATCH/properties/desired/#".to_string(),
 						qos: mqtt::proto::QoS::AtMostOnce,
 					});
-					self.state = State::WaitingForSubscription(Box::new(response_subscription.join(patches_subscription)));
+					let c2d_subscription = self.update_subscription_handle.subscribe(mqtt::proto::SubscribeTo {
+						topic_filter: format!("{}#", self.c2d_prefix),
+						qos: mqtt::proto::QoS::AtLeastOnce,
+					});
+					self.state = State::WaitingForSubscription(Box::new(twin_get_subscription.join3(twin_patches_subscription, c2d_subscription)));
 				},
 
 				State::WaitingForSubscription(f) => match f.poll() {
-					Ok(futures::Async::Ready(((), ()))) => self.state = State::BeginSendingGetRequest,
+					Ok(futures::Async::Ready(((), (), ()))) => self.state = State::BeginSendingGetRequest,
 
 					Ok(futures::Async::NotReady) => match self.inner.poll().map_err(Error::MqttClient)? {
 						// Inner client will resubscribe as necessary, so there's nothing for this client to do
@@ -344,7 +353,7 @@ impl Stream for TwinClient {
 											previous_version: twin_state.desired.version,
 										};
 
-										return Ok(futures::Async::Ready(Some(TwinMessage::Initial(twin_state))));
+										return Ok(futures::Async::Ready(Some(Message::TwinInitial(twin_state))));
 									},
 
 									status => {
@@ -399,10 +408,56 @@ impl Stream for TwinClient {
 								continue;
 							}
 
-							return Ok(futures::Async::Ready(Some(TwinMessage::Patch(twin_properties))));
+							return Ok(futures::Async::Ready(Some(Message::TwinPatch(twin_properties))));
+						}
+						else if publication.topic_name.starts_with(&self.c2d_prefix) {
+							let mut message_id = None;
+							let mut correlation_id = None;
+							let mut to = None;
+							let mut iothub_ack = None;
+							let mut properties: std::collections::HashMap<_, _> = Default::default();
+
+							for (key, value) in url::form_urlencoded::parse(publication.topic_name[self.c2d_prefix.len()..].as_bytes()) {
+								if key == "$.mid" {
+									message_id = Some(value.into_owned());
+								}
+								else if key == "$.cid" {
+									correlation_id = Some(value.into_owned());
+								}
+								else if key == "$.to" {
+									to = Some(value.into_owned());
+								}
+								else if key == "iothub-ack" {
+									iothub_ack = Some(value.into_owned());
+								}
+								else {
+									properties.insert(key.into_owned(), value.into_owned());
+								}
+							}
+
+							match (message_id, to, iothub_ack) {
+								(Some(message_id), Some(to), Some(iothub_ack)) =>
+									return Ok(futures::Async::Ready(Some(Message::CloudToDevice(CloudToDeviceMessage {
+										message_id,
+										correlation_id,
+										to,
+										iothub_ack,
+										properties,
+										data: publication.payload,
+									})))),
+
+								(None, _, _) =>
+									log::debug!(r#"Discarding PUBLISH packet with topic {:?} because it does not contain the "mid" property"#, publication.topic_name),
+
+								(Some(_), None, _) =>
+									log::debug!(r#"Discarding PUBLISH packet with topic {:?} because it does not contain the "to" property"#, publication.topic_name),
+
+								(Some(_), Some(_), None) =>
+									log::debug!(r#"Discarding PUBLISH packet with topic {:?} because it does not contain the "iothub-ack" property"#, publication.topic_name),
+							}
 						}
 						else {
-							log::debug!("Discarding PUBLISH packet with topic {:?} because it's not a PATCH response", publication.topic_name);
+							log::debug!("Discarding PUBLISH packet with topic {:?}", publication.topic_name);
 						},
 
 					futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
@@ -429,7 +484,7 @@ impl std::fmt::Debug for State {
 	}
 }
 
-/// A [`mqtt::IoSource`] implementation used by [`TwinClient`]
+/// A [`mqtt::IoSource`] implementation used by [`Client`]
 pub struct IoSource {
 	iothub_hostname: String,
 	iothub_host: std::net::SocketAddr,
@@ -500,14 +555,17 @@ pub enum Transport {
 	WebSocket,
 }
 
-/// A message generated by a [`TwinClient`]
+/// A message generated by a [`Client`]
 #[derive(Debug)]
-pub enum TwinMessage {
+pub enum Message {
 	/// The full twin state, as currently stored in the Azure IoT Hub.
-	Initial(TwinState),
+	TwinInitial(TwinState),
 
 	/// A patch to the twin state that should be applied to the current state to get the new state.
-	Patch(TwinProperties),
+	TwinPatch(TwinProperties),
+
+	/// A cloud-to-device message
+	CloudToDevice(CloudToDeviceMessage),
 }
 
 /// The full twin state stored in the Azure IoT Hub.
@@ -528,6 +586,16 @@ pub struct TwinProperties {
 
 	#[serde(flatten)]
 	pub properties: std::collections::HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug)]
+pub struct CloudToDeviceMessage {
+	pub message_id: String,
+	pub correlation_id: Option<String>,
+	pub to: String,
+	pub iothub_ack: String,
+	pub properties: std::collections::HashMap<String, String>,
+	pub data: Vec<u8>,
 }
 
 lazy_static::lazy_static! {
