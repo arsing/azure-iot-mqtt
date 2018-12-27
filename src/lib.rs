@@ -74,7 +74,9 @@ enum State {
 	BeginSendingGetRequest,
 	EndSendingGetRequest(Box<dyn Future<Item = (), Error = mqtt::PublishError> + Send>),
 	WaitingForGetResponse(tokio::timer::Delay),
-	HaveGetResponse,
+	HaveGetResponse {
+		previous_version: usize,
+	},
 }
 
 impl TwinClient {
@@ -329,7 +331,7 @@ impl Stream for TwinClient {
 									200 => {
 										self.current_back_off = std::time::Duration::from_secs(0);
 
-										let twin_state = match serde_json::from_slice(&publication.payload) {
+										let twin_state: TwinState = match serde_json::from_slice(&publication.payload) {
 											Ok(twin_state) => twin_state,
 											Err(err) => {
 												log::warn!("could not deserialize GET response: {}", err);
@@ -338,7 +340,10 @@ impl Stream for TwinClient {
 											},
 										};
 
-										self.state = State::HaveGetResponse;
+										self.state = State::HaveGetResponse {
+											previous_version: twin_state.desired.version,
+										};
+
 										return Ok(futures::Async::Ready(Some(TwinMessage::Initial(twin_state))));
 									},
 
@@ -368,7 +373,7 @@ impl Stream for TwinClient {
 					}
 				},
 
-				State::HaveGetResponse => match self.inner.poll().map_err(Error::MqttClient)? {
+				State::HaveGetResponse { previous_version } => match self.inner.poll().map_err(Error::MqttClient)? {
 					futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => {
 						log::warn!("Connection reset. Resending GET request...");
 						self.state = State::BeginSendingGetRequest;
@@ -376,7 +381,7 @@ impl Stream for TwinClient {
 
 					futures::Async::Ready(Some(mqtt::Event::Publication(publication))) =>
 						if publication.topic_name.starts_with("$iothub/twin/PATCH/properties/desired/") {
-							let twin_properties = match serde_json::from_slice(&publication.payload) {
+							let twin_properties: TwinProperties = match serde_json::from_slice(&publication.payload) {
 								Ok(twin_properties) => twin_properties,
 								Err(err) => {
 									log::warn!("could not deserialize PATCH response: {}", err);
@@ -384,6 +389,15 @@ impl Stream for TwinClient {
 									continue;
 								},
 							};
+
+							if twin_properties.version == *previous_version + 1 {
+								*previous_version = twin_properties.version;
+							}
+							else {
+								log::warn!("expected PATCH response with version {} but received version {}", *previous_version + 1, twin_properties.version);
+								self.state = State::BeginSendingGetRequest;
+								continue;
+							}
 
 							return Ok(futures::Async::Ready(Some(TwinMessage::Patch(twin_properties))));
 						}
@@ -410,7 +424,7 @@ impl std::fmt::Debug for State {
 			State::BeginSendingGetRequest => f.debug_struct("BeginSendingGetRequest").finish(),
 			State::EndSendingGetRequest(_) => f.debug_struct("EndSendingGetRequest").finish(),
 			State::WaitingForGetResponse(_) => f.debug_struct("WaitingForGetResponse").finish(),
-			State::HaveGetResponse => f.debug_struct("HaveGetResponse").finish(),
+			State::HaveGetResponse { previous_version } => f.debug_struct("HaveGetResponse").field("previous_version", previous_version).finish(),
 		}
 	}
 }
