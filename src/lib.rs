@@ -19,6 +19,9 @@
 
 use futures::{ Future, Stream };
 
+mod system_properties;
+pub use self::system_properties::SystemProperties;
+
 /// Error type
 #[derive(Debug)]
 pub enum Error {
@@ -384,49 +387,28 @@ impl Stream for Client {
 							return Ok(futures::Async::Ready(Some(Message::TwinPatch(twin_properties))));
 						}
 						else if publication.topic_name.starts_with(&self.c2d_prefix) {
-							let mut message_id = None;
-							let mut correlation_id = None;
-							let mut to = None;
-							let mut iothub_ack = None;
+							let mut system_properties = system_properties::SystemPropertiesBuilder::new();
 							let mut properties: std::collections::HashMap<_, _> = Default::default();
 
 							for (key, value) in url::form_urlencoded::parse(publication.topic_name[self.c2d_prefix.len()..].as_bytes()) {
-								if key == "$.mid" {
-									message_id = Some(value.into_owned());
-								}
-								else if key == "$.cid" {
-									correlation_id = Some(value.into_owned());
-								}
-								else if key == "$.to" {
-									to = Some(value.into_owned());
-								}
-								else if key == "iothub-ack" {
-									iothub_ack = Some(value.into_owned());
-								}
-								else {
+								if let Some(value) = system_properties.try_property(&*key, value) {
 									properties.insert(key.into_owned(), value.into_owned());
 								}
 							}
 
-							match (message_id, to, iothub_ack) {
-								(Some(message_id), Some(to), Some(iothub_ack)) =>
-									return Ok(futures::Async::Ready(Some(Message::CloudToDevice(CloudToDeviceMessage {
-										message_id,
-										correlation_id,
-										to,
-										iothub_ack,
-										properties,
-										data: publication.payload,
-									})))),
+							match system_properties.build() {
+								Ok(system_properties) => return Ok(futures::Async::Ready(Some(Message::CloudToDevice(CloudToDeviceMessage {
+									system_properties,
+									properties,
+									data: publication.payload,
+								})))),
 
-								(None, _, _) =>
-									log::warn!(r#"Discarding C2D message with topic {:?} because it does not contain the "$.mid" property"#, publication.topic_name),
-
-								(Some(_), None, _) =>
-									log::warn!(r#"Discarding C2D message with topic {:?} because it does not contain the "$.to" property"#, publication.topic_name),
-
-								(Some(_), Some(_), None) =>
-									log::warn!(r#"Discarding C2D message with topic {:?} because it does not contain the "iothub-ack" property"#, publication.topic_name),
+								Err(missing_property) =>
+									log::warn!(
+										r#"Discarding C2D message with topic {:?} because it does not contain the {:?} property"#,
+										publication.topic_name,
+										missing_property,
+									)
 							}
 						}
 						else {
@@ -562,10 +544,7 @@ pub struct TwinProperties {
 
 #[derive(Debug)]
 pub struct CloudToDeviceMessage {
-	pub message_id: String,
-	pub correlation_id: Option<String>,
-	pub to: String,
-	pub iothub_ack: String,
+	pub system_properties: SystemProperties,
 	pub properties: std::collections::HashMap<String, String>,
 	pub data: Vec<u8>,
 }
