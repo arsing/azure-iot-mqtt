@@ -371,14 +371,13 @@ impl Stream for Client {
 								},
 							};
 
-							if twin_properties.version == *previous_version + 1 {
-								*previous_version = twin_properties.version;
-							}
-							else {
+							if twin_properties.version != *previous_version + 1 {
 								log::warn!("expected PATCH response with version {} but received version {}", *previous_version + 1, twin_properties.version);
 								self.state = State::BeginSendingGetRequest;
 								continue;
 							}
+
+							*previous_version = twin_properties.version;
 
 							return Ok(futures::Async::Ready(Some(Message::TwinPatch(twin_properties))));
 						}
