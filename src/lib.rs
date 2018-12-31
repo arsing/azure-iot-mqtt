@@ -420,13 +420,13 @@ impl Stream for Client {
 									})))),
 
 								(None, _, _) =>
-									log::debug!(r#"Discarding PUBLISH packet with topic {:?} because it does not contain the "mid" property"#, publication.topic_name),
+									log::warn!(r#"Discarding C2D message with topic {:?} because it does not contain the "$.mid" property"#, publication.topic_name),
 
 								(Some(_), None, _) =>
-									log::debug!(r#"Discarding PUBLISH packet with topic {:?} because it does not contain the "to" property"#, publication.topic_name),
+									log::warn!(r#"Discarding C2D message with topic {:?} because it does not contain the "$.to" property"#, publication.topic_name),
 
 								(Some(_), Some(_), None) =>
-									log::debug!(r#"Discarding PUBLISH packet with topic {:?} because it does not contain the "iothub-ack" property"#, publication.topic_name),
+									log::warn!(r#"Discarding C2D message with topic {:?} because it does not contain the "iothub-ack" property"#, publication.topic_name),
 							}
 						}
 						else {
