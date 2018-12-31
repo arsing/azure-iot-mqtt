@@ -336,6 +336,7 @@ impl Stream for Client {
 							}
 							else {
 								log::debug!("Discarding PUBLISH packet with topic {:?} because it's not the GET response", publication.topic_name);
+								continue;
 							},
 
 						futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
