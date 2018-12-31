@@ -5,6 +5,7 @@
 #![deny(rust_2018_idioms, warnings)]
 #![deny(clippy::all, clippy::pedantic)]
 #![allow(
+	clippy::cyclomatic_complexity,
 	clippy::default_trait_access,
 	clippy::doc_markdown,
 	clippy::large_enum_variant,
@@ -56,8 +57,6 @@ impl std::error::Error for Error {
 /// zero or more [`Message::TwinPatch`] messages and zero or more [`Message::CloudToDevice`] messages.
 pub struct Client {
 	inner: mqtt::Client<IoSource>,
-	publish_handle: mqtt::PublishHandle,
-	update_subscription_handle: mqtt::UpdateSubscriptionHandle,
 
 	keep_alive: std::time::Duration,
 	max_back_off: std::time::Duration,
@@ -68,8 +67,7 @@ pub struct Client {
 }
 
 enum State {
-	BeginSubscription,
-	WaitingForSubscription(Box<dyn Future<Item = ((), (), ()), Error = mqtt::UpdateSubscriptionError> + Send>),
+	Subscribe,
 	BeginBackOff,
 	EndBackOff(tokio::timer::Delay),
 	BeginSendingGetRequest,
@@ -180,31 +178,15 @@ impl Client {
 			keep_alive,
 		);
 
-		let publish_handle = match inner.publish_handle() {
-			Ok(publish_handle) => publish_handle,
-
-			// This can only happen if `inner` has been shut down
-			Err(mqtt::PublishError::ClientDoesNotExist) => unreachable!(),
-		};
-
-		let update_subscription_handle = match inner.update_subscription_handle() {
-			Ok(update_subscription_handle) => update_subscription_handle,
-
-			// This can only happen if `inner` has been shut down
-			Err(mqtt::UpdateSubscriptionError::ClientDoesNotExist) => unreachable!(),
-		};
-
 		Ok(Client {
 			inner,
-			publish_handle,
-			update_subscription_handle,
 
 			keep_alive,
 			max_back_off,
 			current_back_off: std::time::Duration::from_secs(0),
 			c2d_prefix,
 
-			state: State::BeginSubscription,
+			state: State::Subscribe,
 		})
 	}
 
@@ -223,39 +205,30 @@ impl Stream for Client {
 			log::trace!("    {:?}", self.state);
 
 			match &mut self.state {
-				State::BeginSubscription => {
-					let twin_get_subscription = self.update_subscription_handle.subscribe(mqtt::proto::SubscribeTo {
+				State::Subscribe => {
+					let twin_get_subscription = self.inner.subscribe(mqtt::proto::SubscribeTo {
 						topic_filter: "$iothub/twin/res/#".to_string(),
 						qos: mqtt::proto::QoS::AtMostOnce,
 					});
-					let twin_patches_subscription = self.update_subscription_handle.subscribe(mqtt::proto::SubscribeTo {
+
+					let twin_patches_subscription = self.inner.subscribe(mqtt::proto::SubscribeTo {
 						topic_filter: "$iothub/twin/PATCH/properties/desired/#".to_string(),
 						qos: mqtt::proto::QoS::AtMostOnce,
 					});
-					let c2d_subscription = self.update_subscription_handle.subscribe(mqtt::proto::SubscribeTo {
+
+					let c2d_subscription = self.inner.subscribe(mqtt::proto::SubscribeTo {
 						topic_filter: format!("{}#", self.c2d_prefix),
 						qos: mqtt::proto::QoS::AtLeastOnce,
 					});
-					self.state = State::WaitingForSubscription(Box::new(twin_get_subscription.join3(twin_patches_subscription, c2d_subscription)));
-				},
 
-				State::WaitingForSubscription(f) => match f.poll() {
-					Ok(futures::Async::Ready(((), (), ()))) => self.state = State::BeginSendingGetRequest,
+					match twin_get_subscription.and(twin_patches_subscription).and(c2d_subscription) {
+						Ok(()) => (),
 
-					Ok(futures::Async::NotReady) => match self.inner.poll().map_err(Error::MqttClient)? {
-						// Inner client will resubscribe as necessary, so there's nothing for this client to do
-						futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => (),
+						// The subscription can only fail if `self.inner` has shut down, which is not the case here
+						Err(mqtt::UpdateSubscriptionError::ClientDoesNotExist) => unreachable!(),
+					}
 
-						futures::Async::Ready(Some(mqtt::Event::Publication(publication))) =>
-							log::debug!("Discarding PUBLISH packet with topic {:?} because we haven't subscribed yet", publication.topic_name),
-
-						futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
-
-						futures::Async::NotReady => return Ok(futures::Async::NotReady),
-					},
-
-					// The subscription can only fail if `self.inner` has shut down, which is not the case here
-					Err(mqtt::UpdateSubscriptionError::ClientDoesNotExist) => unreachable!(),
+					self.state = State::BeginSendingGetRequest;
 				},
 
 				State::BeginBackOff => match self.current_back_off {
@@ -288,7 +261,7 @@ impl Stream for Client {
 				},
 
 				State::BeginSendingGetRequest =>
-					self.state = State::EndSendingGetRequest(Box::new(self.publish_handle.publish(mqtt::proto::Publication {
+					self.state = State::EndSendingGetRequest(Box::new(self.inner.publish(mqtt::proto::Publication {
 						topic_name: format!("$iothub/twin/GET/?$rid={}", 1),
 						qos: mqtt::proto::QoS::AtMostOnce,
 						retain: false,
@@ -472,8 +445,7 @@ impl Stream for Client {
 impl std::fmt::Debug for State {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			State::BeginSubscription => f.debug_struct("BeginSubscription").finish(),
-			State::WaitingForSubscription(_) => f.debug_struct("WaitingForSubscription").finish(),
+			State::Subscribe => f.debug_struct("Subscribe").finish(),
 			State::BeginBackOff => f.debug_struct("BeginBackOff").finish(),
 			State::EndBackOff(_) => f.debug_struct("EndBackOff").finish(),
 			State::BeginSendingGetRequest => f.debug_struct("BeginSendingGetRequest").finish(),
