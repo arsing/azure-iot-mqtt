@@ -430,7 +430,7 @@ impl Stream for Client {
 							}
 						}
 						else {
-							log::debug!("Discarding PUBLISH packet with topic {:?}", publication.topic_name);
+							log::debug!("Discarding PUBLISH packet with unrecognized topic {:?}", publication.topic_name);
 						},
 
 					futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
