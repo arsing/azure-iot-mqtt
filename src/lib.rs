@@ -70,7 +70,6 @@ pub struct Client {
 }
 
 enum State {
-	Subscribe,
 	BeginBackOff,
 	EndBackOff(tokio::timer::Delay),
 	BeginSendingGetRequest,
@@ -171,7 +170,7 @@ impl Client {
 			extra: io_source_extra,
 		};
 
-		let inner = mqtt::Client::new(
+		let mut inner = mqtt::Client::new(
 			Some(client_id),
 			Some(username),
 			Some(password),
@@ -181,6 +180,28 @@ impl Client {
 			keep_alive,
 		);
 
+		let twin_get_subscription = inner.subscribe(mqtt::proto::SubscribeTo {
+			topic_filter: "$iothub/twin/res/#".to_string(),
+			qos: mqtt::proto::QoS::AtMostOnce,
+		});
+
+		let twin_patches_subscription = inner.subscribe(mqtt::proto::SubscribeTo {
+			topic_filter: "$iothub/twin/PATCH/properties/desired/#".to_string(),
+			qos: mqtt::proto::QoS::AtMostOnce,
+		});
+
+		let c2d_subscription = inner.subscribe(mqtt::proto::SubscribeTo {
+			topic_filter: format!("{}#", c2d_prefix),
+			qos: mqtt::proto::QoS::AtLeastOnce,
+		});
+
+		match twin_get_subscription.and(twin_patches_subscription).and(c2d_subscription) {
+			Ok(()) => (),
+
+			// The subscription can only fail if `self.inner` has shut down, which is not the case here
+			Err(mqtt::UpdateSubscriptionError::ClientDoesNotExist) => unreachable!(),
+		}
+
 		Ok(Client {
 			inner,
 
@@ -189,7 +210,7 @@ impl Client {
 			current_back_off: std::time::Duration::from_secs(0),
 			c2d_prefix,
 
-			state: State::Subscribe,
+			state: State::BeginSendingGetRequest,
 		})
 	}
 
@@ -208,32 +229,6 @@ impl Stream for Client {
 			log::trace!("    {:?}", self.state);
 
 			match &mut self.state {
-				State::Subscribe => {
-					let twin_get_subscription = self.inner.subscribe(mqtt::proto::SubscribeTo {
-						topic_filter: "$iothub/twin/res/#".to_string(),
-						qos: mqtt::proto::QoS::AtMostOnce,
-					});
-
-					let twin_patches_subscription = self.inner.subscribe(mqtt::proto::SubscribeTo {
-						topic_filter: "$iothub/twin/PATCH/properties/desired/#".to_string(),
-						qos: mqtt::proto::QoS::AtMostOnce,
-					});
-
-					let c2d_subscription = self.inner.subscribe(mqtt::proto::SubscribeTo {
-						topic_filter: format!("{}#", self.c2d_prefix),
-						qos: mqtt::proto::QoS::AtLeastOnce,
-					});
-
-					match twin_get_subscription.and(twin_patches_subscription).and(c2d_subscription) {
-						Ok(()) => (),
-
-						// The subscription can only fail if `self.inner` has shut down, which is not the case here
-						Err(mqtt::UpdateSubscriptionError::ClientDoesNotExist) => unreachable!(),
-					}
-
-					self.state = State::BeginSendingGetRequest;
-				},
-
 				State::BeginBackOff => match self.current_back_off {
 					back_off if back_off.as_secs() == 0 => {
 						self.current_back_off = std::time::Duration::from_secs(1);
@@ -427,7 +422,6 @@ impl Stream for Client {
 impl std::fmt::Debug for State {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			State::Subscribe => f.debug_struct("Subscribe").finish(),
 			State::BeginBackOff => f.debug_struct("BeginBackOff").finish(),
 			State::EndBackOff(_) => f.debug_struct("EndBackOff").finish(),
 			State::BeginSendingGetRequest => f.debug_struct("BeginSendingGetRequest").finish(),
