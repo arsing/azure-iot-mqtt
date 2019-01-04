@@ -75,6 +75,7 @@ enum State {
 	BeginSendingGetRequest,
 	EndSendingGetRequest(Box<dyn Future<Item = (), Error = mqtt::PublishError> + Send>),
 	WaitingForGetResponse(tokio::timer::Delay),
+	ReceivedTwinInitial(TwinState),
 	HaveGetResponse {
 		previous_version: usize,
 	},
@@ -249,8 +250,16 @@ impl Stream for Client {
 						// Inner client will resubscribe as necessary, so there's nothing for this client to do
 						futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => (),
 
-						futures::Async::Ready(Some(mqtt::Event::Publication(publication))) =>
-							log::debug!("Discarding PUBLISH packet with topic {:?} because we're still backing off before making a GET request", publication.topic_name),
+						futures::Async::Ready(Some(mqtt::Event::Publication(publication))) => match Message::parse(publication, &self.c2d_prefix) {
+							Ok(message @ Message::CloudToDevice(_)) => return Ok(futures::Async::Ready(Some(message))),
+
+							Ok(message @ Message::TwinInitial(_)) |
+							Ok(message @ Message::TwinPatch(_)) =>
+								log::debug!("Discarding message {:?} because we're still backing off before making a GET request", message),
+
+							Err(err) =>
+								log::warn!("Discarding message that could not be parsed: {}", err),
+						},
 
 						futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
 
@@ -276,8 +285,16 @@ impl Stream for Client {
 						// Inner client hasn't sent the GET request yet, so there's nothing for this client to do
 						futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => (),
 
-						futures::Async::Ready(Some(mqtt::Event::Publication(publication))) =>
-							log::debug!("Discarding PUBLISH packet with topic {:?} because we haven't sent the GET request yet", publication.topic_name),
+						futures::Async::Ready(Some(mqtt::Event::Publication(publication))) => match Message::parse(publication, &self.c2d_prefix) {
+							Ok(message @ Message::CloudToDevice(_)) => return Ok(futures::Async::Ready(Some(message))),
+
+							Ok(message @ Message::TwinInitial(_)) |
+							Ok(message @ Message::TwinPatch(_)) =>
+								log::debug!("Discarding message {:?} because we haven't sent the GET request yet", message),
+
+							Err(err) =>
+								log::warn!("Discarding message that could not be parsed: {}", err),
+						},
 
 						futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
 
@@ -296,48 +313,30 @@ impl Stream for Client {
 							continue;
 						},
 
-						futures::Async::Ready(Some(mqtt::Event::Publication(publication))) =>
-							if let Some(captures) = RESPONSE_REGEX.captures(&publication.topic_name) {
-								let status: usize = match captures[1].parse() {
-									Ok(status) => status,
-									Err(err) => {
-										log::warn!("could not parse status from publication topic {:?}: {}", publication.topic_name, err);
-										self.state = State::BeginBackOff;
-										continue;
-									},
-								};
-
-								match status {
-									200 => {
-										self.current_back_off = std::time::Duration::from_secs(0);
-
-										let twin_state: TwinState = match serde_json::from_slice(&publication.payload) {
-											Ok(twin_state) => twin_state,
-											Err(err) => {
-												log::warn!("could not deserialize GET response: {}", err);
-												self.state = State::BeginBackOff;
-												continue;
-											},
-										};
-
-										self.state = State::HaveGetResponse {
-											previous_version: twin_state.desired.version,
-										};
-
-										return Ok(futures::Async::Ready(Some(Message::TwinInitial(twin_state))));
-									},
-
-									status => {
-										log::warn!("IoT Hub returned status {} in response to initial GET request.", status);
-										self.state = State::BeginBackOff;
-										continue;
-									},
-								}
-							}
-							else {
-								log::debug!("Discarding PUBLISH packet with topic {:?} because it's not the GET response", publication.topic_name);
+						futures::Async::Ready(Some(mqtt::Event::Publication(publication))) => match Message::parse(publication, &self.c2d_prefix) {
+							Ok(Message::TwinInitial(twin_state)) => {
+								self.state = State::ReceivedTwinInitial(twin_state);
 								continue;
 							},
+
+							Ok(Message::TwinPatch(_)) => {
+								log::debug!("Discarding patch response because we haven't received the initial response yet");
+								continue;
+							},
+
+							Ok(message @ Message::CloudToDevice(_)) => return Ok(futures::Async::Ready(Some(message))),
+
+							Err(err @ MessageParseError::IotHubStatus(_)) => {
+								log::warn!("{}", err);
+								self.state = State::BeginBackOff;
+								continue;
+							},
+
+							Err(err) => {
+								log::warn!("Discarding message that could not be parsed: {}", err);
+								continue;
+							},
+						},
 
 						futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
 
@@ -354,23 +353,37 @@ impl Stream for Client {
 					}
 				},
 
+				State::ReceivedTwinInitial(twin_state) => {
+					let twin_state = std::mem::replace(twin_state, TwinState {
+						desired: TwinProperties {
+							version: 0,
+							properties: Default::default(),
+						},
+						reported: TwinProperties {
+							version: 0,
+							properties: Default::default(),
+						},
+					});
+
+					self.current_back_off = std::time::Duration::from_secs(0);
+					self.state = State::HaveGetResponse {
+						previous_version: twin_state.desired.version,
+					};
+
+					return Ok(futures::Async::Ready(Some(Message::TwinInitial(twin_state))));
+				},
+
 				State::HaveGetResponse { previous_version } => match self.inner.poll().map_err(Error::MqttClient)? {
 					futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => {
 						log::warn!("Connection reset. Resending GET request...");
 						self.state = State::BeginSendingGetRequest;
 					},
 
-					futures::Async::Ready(Some(mqtt::Event::Publication(publication))) =>
-						if publication.topic_name.starts_with("$iothub/twin/PATCH/properties/desired/") {
-							let twin_properties: TwinProperties = match serde_json::from_slice(&publication.payload) {
-								Ok(twin_properties) => twin_properties,
-								Err(err) => {
-									log::warn!("could not deserialize PATCH response: {}", err);
-									self.state = State::BeginBackOff;
-									continue;
-								},
-							};
+					futures::Async::Ready(Some(mqtt::Event::Publication(publication))) => match Message::parse(publication, &self.c2d_prefix) {
+						Ok(Message::TwinInitial(twin_state)) =>
+							self.state = State::ReceivedTwinInitial(twin_state),
 
+						Ok(Message::TwinPatch(twin_properties)) => {
 							if twin_properties.version != *previous_version + 1 {
 								log::warn!("expected PATCH response with version {} but received version {}", *previous_version + 1, twin_properties.version);
 								self.state = State::BeginSendingGetRequest;
@@ -380,35 +393,13 @@ impl Stream for Client {
 							*previous_version = twin_properties.version;
 
 							return Ok(futures::Async::Ready(Some(Message::TwinPatch(twin_properties))));
-						}
-						else if publication.topic_name.starts_with(&self.c2d_prefix) {
-							let mut system_properties = system_properties::SystemPropertiesBuilder::new();
-							let mut properties: std::collections::HashMap<_, _> = Default::default();
-
-							for (key, value) in url::form_urlencoded::parse(publication.topic_name[self.c2d_prefix.len()..].as_bytes()) {
-								if let Some(value) = system_properties.try_property(&*key, value) {
-									properties.insert(key.into_owned(), value.into_owned());
-								}
-							}
-
-							match system_properties.build() {
-								Ok(system_properties) => return Ok(futures::Async::Ready(Some(Message::CloudToDevice(CloudToDeviceMessage {
-									system_properties,
-									properties,
-									data: publication.payload,
-								})))),
-
-								Err(missing_property) =>
-									log::warn!(
-										r#"Discarding C2D message with topic {:?} because it does not contain the {:?} property"#,
-										publication.topic_name,
-										missing_property,
-									)
-							}
-						}
-						else {
-							log::debug!("Discarding PUBLISH packet with unrecognized topic {:?}", publication.topic_name);
 						},
+
+						Ok(message @ Message::CloudToDevice(_)) => return Ok(futures::Async::Ready(Some(message))),
+
+						Err(err) =>
+							log::warn!("Discarding message that could not be parsed: {}", err),
+					},
 
 					futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
 
@@ -427,6 +418,7 @@ impl std::fmt::Debug for State {
 			State::BeginSendingGetRequest => f.debug_struct("BeginSendingGetRequest").finish(),
 			State::EndSendingGetRequest(_) => f.debug_struct("EndSendingGetRequest").finish(),
 			State::WaitingForGetResponse(_) => f.debug_struct("WaitingForGetResponse").finish(),
+			State::ReceivedTwinInitial(twin_state) => f.debug_tuple("ReceivedTwinInitial").field(twin_state).finish(),
 			State::HaveGetResponse { previous_version } => f.debug_struct("HaveGetResponse").field("previous_version", previous_version).finish(),
 		}
 	}
@@ -506,14 +498,90 @@ pub enum Transport {
 /// A message generated by a [`Client`]
 #[derive(Debug)]
 pub enum Message {
+	/// A cloud-to-device message
+	CloudToDevice(CloudToDeviceMessage),
+
 	/// The full twin state, as currently stored in the Azure IoT Hub.
 	TwinInitial(TwinState),
 
 	/// A patch to the twin state that should be applied to the current state to get the new state.
 	TwinPatch(TwinProperties),
+}
 
-	/// A cloud-to-device message
-	CloudToDevice(CloudToDeviceMessage),
+impl Message {
+	fn parse(publication: mqtt::ReceivedPublication, c2d_prefix: &str) -> Result<Self, MessageParseError> {
+		if let Some(captures) = RESPONSE_REGEX.captures(&publication.topic_name) {
+			let status = &captures[1];
+			let status: usize = status.parse().map_err(|err| MessageParseError::TwinInitialCouldNotParseStatus(status.to_string(), err))?;
+
+			match status {
+				200 => {
+					let twin_state = serde_json::from_slice(&publication.payload).map_err(MessageParseError::Json)?;
+					Ok(Message::TwinInitial(twin_state))
+				},
+
+				status => Err(MessageParseError::IotHubStatus(status)),
+			}
+		}
+		else if publication.topic_name.starts_with("$iothub/twin/PATCH/properties/desired/") {
+			let twin_properties = serde_json::from_slice(&publication.payload).map_err(MessageParseError::Json)?;
+
+			Ok(Message::TwinPatch(twin_properties))
+		}
+		else if publication.topic_name.starts_with(c2d_prefix) {
+			let mut system_properties = system_properties::SystemPropertiesBuilder::new();
+			let mut properties: std::collections::HashMap<_, _> = Default::default();
+
+			for (key, value) in url::form_urlencoded::parse(publication.topic_name[c2d_prefix.len()..].as_bytes()) {
+				if let Some(value) = system_properties.try_property(&*key, value) {
+					properties.insert(key.into_owned(), value.into_owned());
+				}
+			}
+
+			let system_properties = system_properties.build().map_err(MessageParseError::C2DMessageMissingRequiredProperty)?;
+			Ok(Message::CloudToDevice(CloudToDeviceMessage {
+				system_properties,
+				properties,
+				data: publication.payload,
+			}))
+		}
+		else {
+			Err(MessageParseError::UnrecognizedMessage)
+		}
+	}
+}
+
+#[derive(Debug)]
+enum MessageParseError {
+	C2DMessageMissingRequiredProperty(&'static str),
+	IotHubStatus(usize),
+	Json(serde_json::Error),
+	TwinInitialCouldNotParseStatus(String, std::num::ParseIntError),
+	UnrecognizedMessage,
+}
+
+impl std::fmt::Display for MessageParseError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			MessageParseError::C2DMessageMissingRequiredProperty(property) => write!(f, "C2D message does not contain required property {}", property),
+			MessageParseError::IotHubStatus(status) => write!(f, "IoT Hub failed request with status {}", status),
+			MessageParseError::Json(err) => write!(f, "could not parse payload as valid JSON: {}", err),
+			MessageParseError::TwinInitialCouldNotParseStatus(status, err) => write!(f, "could not parse {:?} as status code: {}", status, err),
+			MessageParseError::UnrecognizedMessage => write!(f, "message could not be recognized"),
+		}
+	}
+}
+
+impl std::error::Error for MessageParseError {
+	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+		match self {
+			MessageParseError::C2DMessageMissingRequiredProperty(_) => None,
+			MessageParseError::IotHubStatus(_) => None,
+			MessageParseError::Json(err) => Some(err),
+			MessageParseError::TwinInitialCouldNotParseStatus(_, err) => Some(err),
+			MessageParseError::UnrecognizedMessage => None,
+		}
+	}
 }
 
 /// The full twin state stored in the Azure IoT Hub.
