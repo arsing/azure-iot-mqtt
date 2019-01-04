@@ -20,7 +20,7 @@
 use futures::{ Future, Stream };
 
 mod system_properties;
-pub use self::system_properties::SystemProperties;
+pub use self::system_properties::{ IotHubAck, SystemProperties };
 
 /// Error type
 #[derive(Debug)]

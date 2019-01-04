@@ -4,7 +4,16 @@ pub struct SystemProperties {
 	pub correlation_id: Option<String>,
 	pub message_id: String,
 	pub to: String,
-	pub iothub_ack: String,
+	pub iothub_ack: IotHubAck,
+}
+
+#[derive(Debug)]
+pub enum IotHubAck {
+	Full,
+	Negative,
+	None,
+	Positive,
+	Other(String),
 }
 
 #[derive(Debug, Default)]
@@ -12,7 +21,7 @@ pub(super) struct SystemPropertiesBuilder {
 	correlation_id: Option<String>,
 	message_id: Option<String>,
 	to: Option<String>,
-	iothub_ack: Option<String>,
+	iothub_ack: Option<IotHubAck>,
 }
 
 impl SystemPropertiesBuilder {
@@ -43,7 +52,14 @@ impl SystemPropertiesBuilder {
 			},
 
 			"iothub-ack" => {
-				self.iothub_ack = Some(value.into_owned());
+				self.iothub_ack = Some(match &*value {
+					"full" => IotHubAck::Full,
+					"negative" => IotHubAck::Negative,
+					"none" => IotHubAck::None,
+					"positive" => IotHubAck::Positive,
+					_ => IotHubAck::Other(value.into_owned()),
+				});
+
 				None
 			},
 
