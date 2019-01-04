@@ -52,6 +52,7 @@ fn main() {
 	} = structopt::StructOpt::from_args();
 
 	let mut runtime = tokio::runtime::Runtime::new().expect("couldn't initialize tokio runtime");
+	let executor = runtime.executor();
 
 	let client = azure_iot_mqtt::Client::new(
 		iothub_hostname,
@@ -76,8 +77,23 @@ fn main() {
 			Ok(())
 		}));
 
-	let f = client.for_each(|message| {
+	let direct_method_response_handle = client.direct_method_response_handle();
+
+	let f = client.for_each(move |message| {
 		log::info!("received message {:?}", message);
+
+		if let azure_iot_mqtt::Message::DirectMethod { name, payload, request_id } = message {
+			log::info!("direct method {:?} invoked with payload {:?}", name, payload);
+
+			// Respond with status 200 and same payload
+			executor.spawn(direct_method_response_handle
+				.respond(request_id.clone(), 200, payload)
+				.then(move |result| {
+					let () = result.expect("couldn't send direct method response");
+					log::info!("Responded to request {}", request_id);
+					Ok(())
+				}));
+		}
 
 		Ok(())
 	});

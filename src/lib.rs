@@ -17,7 +17,7 @@
 	clippy::use_self,
 )]
 
-use futures::{ Future, Stream };
+use futures::{ Future, Sink, Stream };
 
 mod system_properties;
 pub use self::system_properties::{ IotHubAck, SystemProperties };
@@ -67,6 +67,9 @@ pub struct Client {
 	c2d_prefix: String,
 
 	state: State,
+
+	direct_method_response_send: futures::sync::mpsc::Sender<DirectMethodResponse>,
+	direct_method_response_recv: futures::sync::mpsc::Receiver<DirectMethodResponse>,
 }
 
 enum State {
@@ -196,12 +199,19 @@ impl Client {
 			qos: mqtt::proto::QoS::AtLeastOnce,
 		});
 
-		match twin_get_subscription.and(twin_patches_subscription).and(c2d_subscription) {
+		let direct_method_subscription = inner.subscribe(mqtt::proto::SubscribeTo {
+			topic_filter: "$iothub/methods/POST/#".to_string(),
+			qos: mqtt::proto::QoS::AtLeastOnce,
+		});
+
+		match twin_get_subscription.and(twin_patches_subscription).and(c2d_subscription).and(direct_method_subscription) {
 			Ok(()) => (),
 
 			// The subscription can only fail if `self.inner` has shut down, which is not the case here
 			Err(mqtt::UpdateSubscriptionError::ClientDoesNotExist) => unreachable!(),
 		}
+
+		let (direct_method_response_send, direct_method_response_recv) = futures::sync::mpsc::channel(0);
 
 		Ok(Client {
 			inner,
@@ -212,12 +222,19 @@ impl Client {
 			c2d_prefix,
 
 			state: State::BeginSendingGetRequest,
+
+			direct_method_response_send,
+			direct_method_response_recv,
 		})
 	}
 
 	/// Gets a reference to the inner `mqtt::Client`
 	pub fn inner(&self) -> &mqtt::Client<IoSource> {
 		&self.inner
+	}
+
+	pub fn direct_method_response_handle(&self) -> DirectMethodResponseHandle {
+		DirectMethodResponseHandle(self.direct_method_response_send.clone())
 	}
 }
 
@@ -228,6 +245,21 @@ impl Stream for Client {
 	fn poll(&mut self) -> futures::Poll<Option<Self::Item>, Self::Error> {
 		loop {
 			log::trace!("    {:?}", self.state);
+
+			while let futures::Async::Ready(Some(direct_method_response)) = self.direct_method_response_recv.poll().expect("Receiver::poll cannot fail") {
+				let DirectMethodResponse { request_id, status, payload, ack_sender } = direct_method_response;
+				let payload = serde_json::to_vec(&payload).expect("cannot fail to serialize serde_json::Value");
+				let publication = mqtt::proto::Publication {
+					topic_name: format!("$iothub/methods/res/{}/?$rid={}", status, request_id),
+					qos: mqtt::proto::QoS::AtLeastOnce,
+					retain: false,
+					payload,
+				};
+
+				if ack_sender.send(Box::new(self.inner.publish(publication))).is_err() {
+					log::debug!("could not send ack for direct method response because ack receiver has been dropped");
+				}
+			}
 
 			match &mut self.state {
 				State::BeginBackOff => match self.current_back_off {
@@ -251,7 +283,8 @@ impl Stream for Client {
 						futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => (),
 
 						futures::Async::Ready(Some(mqtt::Event::Publication(publication))) => match Message::parse(publication, &self.c2d_prefix) {
-							Ok(message @ Message::CloudToDevice(_)) => return Ok(futures::Async::Ready(Some(message))),
+							Ok(message @ Message::CloudToDevice(_)) |
+							Ok(message @ Message::DirectMethod { .. }) => return Ok(futures::Async::Ready(Some(message))),
 
 							Ok(message @ Message::TwinInitial(_)) |
 							Ok(message @ Message::TwinPatch(_)) =>
@@ -286,7 +319,8 @@ impl Stream for Client {
 						futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => (),
 
 						futures::Async::Ready(Some(mqtt::Event::Publication(publication))) => match Message::parse(publication, &self.c2d_prefix) {
-							Ok(message @ Message::CloudToDevice(_)) => return Ok(futures::Async::Ready(Some(message))),
+							Ok(message @ Message::CloudToDevice(_)) |
+							Ok(message @ Message::DirectMethod { .. }) => return Ok(futures::Async::Ready(Some(message))),
 
 							Ok(message @ Message::TwinInitial(_)) |
 							Ok(message @ Message::TwinPatch(_)) =>
@@ -314,6 +348,9 @@ impl Stream for Client {
 						},
 
 						futures::Async::Ready(Some(mqtt::Event::Publication(publication))) => match Message::parse(publication, &self.c2d_prefix) {
+							Ok(message @ Message::CloudToDevice(_)) |
+							Ok(message @ Message::DirectMethod { .. }) => return Ok(futures::Async::Ready(Some(message))),
+
 							Ok(Message::TwinInitial(twin_state)) => {
 								self.state = State::ReceivedTwinInitial(twin_state);
 								continue;
@@ -323,8 +360,6 @@ impl Stream for Client {
 								log::debug!("Discarding patch response because we haven't received the initial response yet");
 								continue;
 							},
-
-							Ok(message @ Message::CloudToDevice(_)) => return Ok(futures::Async::Ready(Some(message))),
 
 							Err(err @ MessageParseError::IotHubStatus(_)) => {
 								log::warn!("{}", err);
@@ -380,6 +415,9 @@ impl Stream for Client {
 					},
 
 					futures::Async::Ready(Some(mqtt::Event::Publication(publication))) => match Message::parse(publication, &self.c2d_prefix) {
+						Ok(message @ Message::CloudToDevice(_)) |
+						Ok(message @ Message::DirectMethod { .. }) => return Ok(futures::Async::Ready(Some(message))),
+
 						Ok(Message::TwinInitial(twin_state)) =>
 							self.state = State::ReceivedTwinInitial(twin_state),
 
@@ -394,8 +432,6 @@ impl Stream for Client {
 
 							return Ok(futures::Async::Ready(Some(Message::TwinPatch(twin_properties))));
 						},
-
-						Ok(message @ Message::CloudToDevice(_)) => return Ok(futures::Async::Ready(Some(message))),
 
 						Err(err) =>
 							log::warn!("Discarding message that could not be parsed: {}", err),
@@ -501,6 +537,13 @@ pub enum Message {
 	/// A cloud-to-device message
 	CloudToDevice(CloudToDeviceMessage),
 
+	/// A direct method invocation
+	DirectMethod {
+		name: String,
+		payload: serde_json::Value,
+		request_id: String,
+	},
+
 	/// The full twin state, as currently stored in the Azure IoT Hub.
 	TwinInitial(TwinState),
 
@@ -544,6 +587,17 @@ impl Message {
 				properties,
 				data: publication.payload,
 			}))
+		}
+		else if let Some(captures) = DIRECT_METHOD_REGEX.captures(&publication.topic_name) {
+			let name = captures[1].to_string();
+			let payload = serde_json::from_slice(&publication.payload).map_err(MessageParseError::Json)?;
+			let request_id = captures[2].to_string();
+
+			Ok(Message::DirectMethod {
+				name,
+				payload,
+				request_id,
+			})
 		}
 		else {
 			Err(MessageParseError::UnrecognizedMessage)
@@ -611,8 +665,55 @@ pub struct CloudToDeviceMessage {
 	pub data: Vec<u8>,
 }
 
+pub struct DirectMethodResponseHandle(futures::sync::mpsc::Sender<DirectMethodResponse>);
+
+impl DirectMethodResponseHandle {
+	pub fn respond(&self, request_id: String, status: usize, payload: serde_json::Value) -> impl Future<Item = (), Error = DirectMethodResponseError> {
+		let (ack_sender, ack_receiver) = futures::sync::oneshot::channel();
+		let ack_receiver = ack_receiver.map_err(|_| DirectMethodResponseError::ClientDoesNotExist);
+
+		self.0.clone()
+			.send(DirectMethodResponse {
+				request_id,
+				status,
+				payload,
+				ack_sender,
+			})
+			.then(|result| match result {
+				Ok(_) => Ok(()),
+				Err(_) => Err(DirectMethodResponseError::ClientDoesNotExist),
+			})
+			.and_then(|()| ack_receiver)
+			.and_then(|publish| publish.map_err(|_| DirectMethodResponseError::ClientDoesNotExist))
+	}
+}
+
+#[derive(Debug)]
+pub enum DirectMethodResponseError {
+	ClientDoesNotExist,
+}
+
+impl std::fmt::Display for DirectMethodResponseError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			DirectMethodResponseError::ClientDoesNotExist => write!(f, "client does not exist"),
+		}
+	}
+}
+
+impl std::error::Error for DirectMethodResponseError {
+}
+
+struct DirectMethodResponse {
+	request_id: String,
+	status: usize,
+	payload: serde_json::Value,
+	ack_sender: futures::sync::oneshot::Sender<Box<dyn Future<Item = (), Error = mqtt::PublishError> + Send>>,
+}
+
 lazy_static::lazy_static! {
 	static ref RESPONSE_REGEX: regex::Regex = regex::Regex::new(r"^\$iothub/twin/res/(\d+)/\?\$rid=1$").expect("could not compile regex");
+	static ref DIRECT_METHOD_REGEX: regex::Regex = regex::Regex::new(r"^\$iothub/methods/POST/([^/]+)/\?\$rid=(.+)$").expect("could not compile regex");
 }
 
 enum WsConnect<S> where S: std::io::Read + std::io::Write {
