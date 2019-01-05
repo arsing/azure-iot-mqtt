@@ -17,7 +17,7 @@ pub enum IotHubAck {
 }
 
 #[derive(Debug, Default)]
-pub(super) struct SystemPropertiesBuilder {
+pub(crate) struct SystemPropertiesBuilder {
 	correlation_id: Option<String>,
 	message_id: Option<String>,
 	to: Option<String>,
