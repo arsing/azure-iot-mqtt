@@ -71,7 +71,20 @@ impl mqtt::IoSource for IoSource {
 		let extra = self.extra.clone();
 
 		Box::new(
-			tokio::net::TcpStream::connect(&self.iothub_host)
+			tokio::timer::Timeout::new(tokio::net::TcpStream::connect(&self.iothub_host), timeout)
+			.map_err(|err|
+				if err.is_inner() {
+					err.into_inner().unwrap()
+				}
+				else if err.is_elapsed() {
+					std::io::ErrorKind::TimedOut.into()
+				}
+				else if err.is_timer() {
+					panic!("could not poll connect timer: {}", err);
+				}
+				else {
+					panic!("unreachable error: {}", err);
+				})
 			.and_then(move |stream| {
 				stream.set_nodelay(true)?;
 
