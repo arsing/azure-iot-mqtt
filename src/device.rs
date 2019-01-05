@@ -78,12 +78,12 @@ impl Client {
 	) -> Result<Self, crate::Error> {
 		let iothub_hostname = iothub_hostname.into();
 
-		let will = mqtt::proto::Publication {
+		let will = will.map(|payload| mqtt::proto::Publication {
 			topic_name: format!("devices/{}/messages/events/", device_id),
 			qos: mqtt::proto::QoS::AtMostOnce,
 			retain: false,
-			payload: will.unwrap_or_else(Vec::new),
-		};
+			payload,
+		});
 
 		let c2d_prefix = format!("devices/{}/messages/devicebound/", device_id);
 
@@ -102,7 +102,7 @@ impl Client {
 			Some(client_id),
 			Some(username),
 			Some(password),
-			Some(will),
+			will,
 			io_source,
 			max_back_off,
 			keep_alive,
