@@ -20,6 +20,8 @@ pub mod device;
 mod io;
 pub use self::io::{ Io, IoSource, Transport };
 
+pub mod module;
+
 mod system_properties;
 pub use self::system_properties::{ IotHubAck, SystemProperties };
 
