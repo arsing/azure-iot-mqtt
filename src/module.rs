@@ -29,9 +29,9 @@ impl Client {
 	///
 	///     The ID of the module.
 	///
-	/// * `sas_token`
+	/// * `authentication`
 	///
-	///     The SAS token to use for authorizing this client with the Azure IoT Hub.
+	///     The method this client should use to authorize with the Azure IoT Hub.
 	///
 	/// * `transport`
 	///
