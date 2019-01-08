@@ -62,50 +62,32 @@ impl Client {
 		max_back_off: std::time::Duration,
 		keep_alive: std::time::Duration,
 	) -> Result<Self, crate::CreateClientError> {
-		let will = will.map(|payload| mqtt::proto::Publication {
-			topic_name: format!("devices/{}/modules/{}/messages/events/", device_id, module_id),
-			qos: mqtt::proto::QoS::AtMostOnce,
-			retain: false,
-			payload,
-		});
+		let client_id = format!("{}/{}", device_id, module_id);
 
 		let username = format!("{}/{}/{}/?api-version=2018-06-30", iothub_hostname, device_id, module_id);
 
-		let (password, certificate) = match authentication {
-			crate::Authentication::SasToken(sas_token) => (Some(sas_token), None),
-			crate::Authentication::Certificate { der, password } => (None, Some((der, password))),
-		};
+		let will = will.map(|payload| (format!("devices/{}/modules/{}/messages/events/", device_id, module_id), payload));
 
-		let client_id = format!("{}/{}", device_id, module_id);
-
-		let io_source = crate::IoSource::new(
-			iothub_hostname.into(),
-			certificate.into(),
-			2 * keep_alive,
+		let inner = crate::client_common::new(
+			iothub_hostname,
+			client_id,
+			username,
+			authentication,
 			transport,
-		)?;
 
-		let mut inner = mqtt::Client::new(
-			Some(client_id),
-			Some(username),
-			password,
 			will,
-			io_source,
+
 			max_back_off,
 			keep_alive,
-		);
 
-		let module_method_subscription = inner.subscribe(mqtt::proto::SubscribeTo {
-			topic_filter: "$iothub/methods/POST/#".to_string(),
-			qos: mqtt::proto::QoS::AtLeastOnce,
-		});
-
-		match module_method_subscription {
-			Ok(()) => (),
-
-			// The subscription can only fail if `self.inner` has shut down, which is not the case here
-			Err(mqtt::UpdateSubscriptionError::ClientDoesNotExist) => unreachable!(),
-		}
+			vec![
+				// Module methods
+				mqtt::proto::SubscribeTo {
+					topic_filter: "$iothub/methods/POST/#".to_string(),
+					qos: mqtt::proto::QoS::AtLeastOnce,
+				},
+			],
+		)?;
 
 		let (module_method_response_send, module_method_response_recv) = futures::sync::mpsc::channel(0);
 

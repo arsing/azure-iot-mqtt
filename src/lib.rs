@@ -15,6 +15,8 @@
 	clippy::use_self,
 )]
 
+mod client_common;
+
 pub mod device;
 
 mod io;

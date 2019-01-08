@@ -76,67 +76,50 @@ impl Client {
 		max_back_off: std::time::Duration,
 		keep_alive: std::time::Duration,
 	) -> Result<Self, crate::CreateClientError> {
-		let will = will.map(|payload| mqtt::proto::Publication {
-			topic_name: format!("devices/{}/messages/events/", device_id),
-			qos: mqtt::proto::QoS::AtMostOnce,
-			retain: false,
-			payload,
-		});
+		let username = format!("{}/{}/api-version=2018-06-30", iothub_hostname, device_id);
+
+		let will = will.map(|payload| (format!("devices/{}/messages/events/", device_id), payload));
 
 		let c2d_prefix = format!("devices/{}/messages/devicebound/", device_id);
 
-		let username = format!("{}/{}/api-version=2018-06-30", iothub_hostname, device_id);
-
-		let (password, certificate) = match authentication {
-			crate::Authentication::SasToken(sas_token) => (Some(sas_token), None),
-			crate::Authentication::Certificate { der, password } => (None, Some((der, password))),
-		};
-
-		let client_id = device_id;
-
-		let io_source = crate::IoSource::new(
-			iothub_hostname.into(),
-			certificate.into(),
-			2 * keep_alive,
+		let inner = crate::client_common::new(
+			iothub_hostname,
+			device_id,
+			username,
+			authentication,
 			transport,
-		)?;
 
-		let mut inner = mqtt::Client::new(
-			Some(client_id),
-			Some(username),
-			password,
 			will,
-			io_source,
+
 			max_back_off,
 			keep_alive,
-		);
 
-		let twin_get_subscription = inner.subscribe(mqtt::proto::SubscribeTo {
-			topic_filter: "$iothub/twin/res/#".to_string(),
-			qos: mqtt::proto::QoS::AtMostOnce,
-		});
+			vec![
+				// Twin initial GET response
+				mqtt::proto::SubscribeTo {
+					topic_filter: "$iothub/twin/res/#".to_string(),
+					qos: mqtt::proto::QoS::AtMostOnce,
+				},
 
-		let twin_patches_subscription = inner.subscribe(mqtt::proto::SubscribeTo {
-			topic_filter: "$iothub/twin/PATCH/properties/desired/#".to_string(),
-			qos: mqtt::proto::QoS::AtMostOnce,
-		});
+				// Twin patches
+				mqtt::proto::SubscribeTo {
+					topic_filter: "$iothub/twin/PATCH/properties/desired/#".to_string(),
+					qos: mqtt::proto::QoS::AtMostOnce,
+				},
 
-		let c2d_subscription = inner.subscribe(mqtt::proto::SubscribeTo {
-			topic_filter: format!("{}#", c2d_prefix),
-			qos: mqtt::proto::QoS::AtLeastOnce,
-		});
+				// C2D messages
+				mqtt::proto::SubscribeTo {
+					topic_filter: format!("{}#", c2d_prefix),
+					qos: mqtt::proto::QoS::AtLeastOnce,
+				},
 
-		let direct_method_subscription = inner.subscribe(mqtt::proto::SubscribeTo {
-			topic_filter: "$iothub/methods/POST/#".to_string(),
-			qos: mqtt::proto::QoS::AtLeastOnce,
-		});
-
-		match twin_get_subscription.and(twin_patches_subscription).and(c2d_subscription).and(direct_method_subscription) {
-			Ok(()) => (),
-
-			// The subscription can only fail if `self.inner` has shut down, which is not the case here
-			Err(mqtt::UpdateSubscriptionError::ClientDoesNotExist) => unreachable!(),
-		}
+				// Direct methods
+				mqtt::proto::SubscribeTo {
+					topic_filter: "$iothub/methods/POST/#".to_string(),
+					qos: mqtt::proto::QoS::AtLeastOnce,
+				},
+			],
+		)?;
 
 		let (direct_method_response_send, direct_method_response_recv) = futures::sync::mpsc::channel(0);
 
