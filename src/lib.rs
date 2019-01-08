@@ -25,32 +25,29 @@ pub mod module;
 mod system_properties;
 pub use self::system_properties::{ IotHubAck, SystemProperties };
 
-/// Error type
+/// Errors from creating a device or module client
 #[derive(Debug)]
-pub enum Error {
-	MqttClient(mqtt::Error),
+pub enum CreateClientError {
 	ResolveIotHubHostname(Option<std::io::Error>),
 	WebSocketUrl(url::ParseError),
 }
 
-impl std::fmt::Display for Error {
+impl std::fmt::Display for CreateClientError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			Error::MqttClient(err) => write!(f, "MQTT client encountered an error: {}", err),
-			Error::ResolveIotHubHostname(Some(err)) => write!(f, "could not resolve Azure IoT Hub hostname: {}", err),
-			Error::ResolveIotHubHostname(None) => write!(f, "could not resolve Azure IoT Hub hostname: no addresses found"),
-			Error::WebSocketUrl(err) => write!(f, "could not construct a valid URL for the Azure IoT Hub: {}", err),
+			CreateClientError::ResolveIotHubHostname(Some(err)) => write!(f, "could not resolve Azure IoT Hub hostname: {}", err),
+			CreateClientError::ResolveIotHubHostname(None) => write!(f, "could not resolve Azure IoT Hub hostname: no addresses found"),
+			CreateClientError::WebSocketUrl(err) => write!(f, "could not construct a valid URL for the Azure IoT Hub: {}", err),
 		}
 	}
 }
 
-impl std::error::Error for Error {
+impl std::error::Error for CreateClientError {
 	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
 		match self {
-			Error::MqttClient(err) => Some(err),
-			Error::ResolveIotHubHostname(Some(err)) => Some(err),
-			Error::ResolveIotHubHostname(None) => None,
-			Error::WebSocketUrl(err) => Some(err),
+			CreateClientError::ResolveIotHubHostname(Some(err)) => Some(err),
+			CreateClientError::ResolveIotHubHostname(None) => None,
+			CreateClientError::WebSocketUrl(err) => Some(err),
 		}
 	}
 }

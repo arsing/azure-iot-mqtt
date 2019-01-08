@@ -61,7 +61,7 @@ impl Client {
 
 		max_back_off: std::time::Duration,
 		keep_alive: std::time::Duration,
-	) -> Result<Self, crate::Error> {
+	) -> Result<Self, crate::CreateClientError> {
 		let iothub_hostname = iothub_hostname.into();
 
 		let will = will.map(|payload| mqtt::proto::Publication {
@@ -127,7 +127,7 @@ impl Client {
 
 impl Stream for Client {
 	type Item = Message;
-	type Error = crate::Error;
+	type Error = mqtt::Error;
 
 	fn poll(&mut self) -> futures::Poll<Option<Self::Item>, Self::Error> {
 		loop {
@@ -146,7 +146,7 @@ impl Stream for Client {
 				}
 			}
 
-			match self.inner.poll().map_err(crate::Error::MqttClient)? {
+			match self.inner.poll()? {
 				futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) =>
 					log::debug!("new connection established"),
 

@@ -25,7 +25,7 @@ impl IoSource {
 		iothub_hostname: std::sync::Arc<str>,
 		timeout: std::time::Duration,
 		transport: crate::Transport,
-	) -> Result<Self, crate::Error> {
+	) -> Result<Self, crate::CreateClientError> {
 		let port = match transport {
 			crate::Transport::Tcp => 8883,
 			crate::Transport::WebSocket => 443,
@@ -33,9 +33,9 @@ impl IoSource {
 
 		let iothub_host =
 			std::net::ToSocketAddrs::to_socket_addrs(&(&*iothub_hostname, port))
-			.map_err(|err| crate::Error::ResolveIotHubHostname(Some(err)))?
+			.map_err(|err| crate::CreateClientError::ResolveIotHubHostname(Some(err)))?
 			.next()
-			.ok_or(crate::Error::ResolveIotHubHostname(None))?;
+			.ok_or(crate::CreateClientError::ResolveIotHubHostname(None))?;
 
 		let extra = match transport {
 			crate::Transport::Tcp => crate::io::IoSourceExtra::Raw,
@@ -43,7 +43,7 @@ impl IoSource {
 			crate::Transport::WebSocket => {
 				let url = match format!("ws://{}/$iothub/websocket", iothub_hostname).parse() {
 					Ok(url) => url,
-					Err(err) => return Err(crate::Error::WebSocketUrl(err)),
+					Err(err) => return Err(crate::CreateClientError::WebSocketUrl(err)),
 				};
 
 				crate::io::IoSourceExtra::WebSocket {

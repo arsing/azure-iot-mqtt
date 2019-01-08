@@ -75,7 +75,7 @@ impl Client {
 
 		max_back_off: std::time::Duration,
 		keep_alive: std::time::Duration,
-	) -> Result<Self, crate::Error> {
+	) -> Result<Self, crate::CreateClientError> {
 		let iothub_hostname = iothub_hostname.into();
 
 		let will = will.map(|payload| mqtt::proto::Publication {
@@ -165,7 +165,7 @@ impl Client {
 
 impl Stream for Client {
 	type Item = Message;
-	type Error = crate::Error;
+	type Error = mqtt::Error;
 
 	fn poll(&mut self) -> futures::Poll<Option<Self::Item>, Self::Error> {
 		loop {
@@ -203,7 +203,7 @@ impl Stream for Client {
 
 				State::EndBackOff(back_off_timer) => match back_off_timer.poll().expect("could not poll back-off timer") {
 					futures::Async::Ready(()) => self.state = State::BeginSendingGetRequest,
-					futures::Async::NotReady => match self.inner.poll().map_err(crate::Error::MqttClient)? {
+					futures::Async::NotReady => match self.inner.poll()? {
 						// Inner client will resubscribe as necessary, so there's nothing for this client to do
 						futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => (),
 
@@ -239,7 +239,7 @@ impl Stream for Client {
 						self.state = State::WaitingForGetResponse(tokio::timer::Delay::new(deadline));
 					},
 
-					Ok(futures::Async::NotReady) => match self.inner.poll().map_err(crate::Error::MqttClient)? {
+					Ok(futures::Async::NotReady) => match self.inner.poll()? {
 						// Inner client hasn't sent the GET request yet, so there's nothing for this client to do
 						futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => (),
 
@@ -265,7 +265,7 @@ impl Stream for Client {
 				},
 
 				State::WaitingForGetResponse(timer) => {
-					match self.inner.poll().map_err(crate::Error::MqttClient)? {
+					match self.inner.poll()? {
 						futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => {
 							log::warn!("Connection reset while waiting for GET response. Resending GET request...");
 							self.state = State::BeginSendingGetRequest;
@@ -333,7 +333,7 @@ impl Stream for Client {
 					return Ok(futures::Async::Ready(Some(Message::TwinInitial(twin_state))));
 				},
 
-				State::HaveGetResponse { previous_version } => match self.inner.poll().map_err(crate::Error::MqttClient)? {
+				State::HaveGetResponse { previous_version } => match self.inner.poll()? {
 					futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => {
 						log::warn!("Connection reset. Resending GET request...");
 						self.state = State::BeginSendingGetRequest;
