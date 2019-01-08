@@ -25,6 +25,17 @@ pub mod module;
 mod system_properties;
 pub use self::system_properties::{ IotHubAck, SystemProperties };
 
+/// The type of authentication the client should use to connect to the Azure IoT Hub
+#[derive(Debug)]
+pub enum Authentication {
+	SasToken(String),
+
+	Certificate {
+		der: Vec<u8>,
+		password: String,
+	},
+}
+
 /// Errors from creating a device or module client
 #[derive(Debug)]
 pub enum CreateClientError {

@@ -4,7 +4,10 @@
 
 use futures::{ Future, Stream };
 
+mod common;
+
 #[derive(Debug, structopt_derive::StructOpt)]
+#[structopt(raw(group = "common::authentication_group()"))]
 struct Options {
 	#[structopt(help = "Device ID", long = "device-id")]
 	device_id: String,
@@ -12,8 +15,24 @@ struct Options {
 	#[structopt(help = "IoT Hub hostname (eg foo.azure-devices.net)", long = "iothub-hostname")]
 	iothub_hostname: String,
 
-	#[structopt(help = "SAS token", long = "sas-token")]
-	sas_token: String,
+	#[structopt(help = "SAS token for token authentication", long = "sas-token", group = "authentication")]
+	sas_token: Option<String>,
+
+	#[structopt(
+		help = "Path of certificate file (PKCS #12) for certificate authentication",
+		long = "certificate-file",
+		group = "authentication",
+		requires = "certificate_file_password",
+		parse(from_os_str),
+	)]
+	certificate_file: Option<std::path::PathBuf>,
+
+	#[structopt(
+		help = "Password to decrypt certificate file for certificate authentication",
+		long = "certificate-file-password",
+		requires = "certificate_file",
+	)]
+	certificate_file_password: Option<String>,
 
 	#[structopt(help = "Whether to use websockets or bare TLS to connect to the Iot Hub", long = "use-websocket")]
 	use_websocket: bool,
@@ -25,7 +44,7 @@ struct Options {
 		help = "Maximum back-off time between reconnections to the server, in seconds.",
 		long = "max-back-off",
 		default_value = "30",
-		parse(try_from_str = "duration_from_secs_str"),
+		parse(try_from_str = "common::duration_from_secs_str"),
 	)]
 	max_back_off: std::time::Duration,
 
@@ -33,7 +52,7 @@ struct Options {
 		help = "Keep-alive time advertised to the server, in seconds.",
 		long = "keep-alive",
 		default_value = "5",
-		parse(try_from_str = "duration_from_secs_str"),
+		parse(try_from_str = "common::duration_from_secs_str"),
 	)]
 	keep_alive: std::time::Duration,
 }
@@ -45,11 +64,15 @@ fn main() {
 		device_id,
 		iothub_hostname,
 		sas_token,
+		certificate_file,
+		certificate_file_password,
 		use_websocket,
 		will,
 		max_back_off,
 		keep_alive,
 	} = structopt::StructOpt::from_args();
+
+	let authentication = common::parse_authentication(sas_token, certificate_file, certificate_file_password);
 
 	let mut runtime = tokio::runtime::Runtime::new().expect("couldn't initialize tokio runtime");
 	let executor = runtime.executor();
@@ -57,7 +80,7 @@ fn main() {
 	let client = azure_iot_mqtt::device::Client::new(
 		iothub_hostname,
 		device_id,
-		sas_token,
+		authentication,
 		if use_websocket { azure_iot_mqtt::Transport::WebSocket } else { azure_iot_mqtt::Transport::Tcp },
 
 		will.map(String::into_bytes),
@@ -99,8 +122,4 @@ fn main() {
 	});
 
 	runtime.block_on(f).expect("azure-iot-mqtt client failed");
-}
-
-fn duration_from_secs_str(s: &str) -> Result<std::time::Duration, <u64 as std::str::FromStr>::Err> {
-	Ok(std::time::Duration::from_secs(s.parse()?))
 }

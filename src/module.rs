@@ -54,7 +54,7 @@ impl Client {
 		iothub_hostname: String,
 		device_id: &str,
 		module_id: &str,
-		sas_token: String,
+		authentication: crate::Authentication,
 		transport: crate::Transport,
 
 		will: Option<Vec<u8>>,
@@ -62,8 +62,6 @@ impl Client {
 		max_back_off: std::time::Duration,
 		keep_alive: std::time::Duration,
 	) -> Result<Self, crate::CreateClientError> {
-		let iothub_hostname = iothub_hostname.into();
-
 		let will = will.map(|payload| mqtt::proto::Publication {
 			topic_name: format!("devices/{}/modules/{}/messages/events/", device_id, module_id),
 			qos: mqtt::proto::QoS::AtMostOnce,
@@ -72,12 +70,17 @@ impl Client {
 		});
 
 		let username = format!("{}/{}/{}/?api-version=2018-06-30", iothub_hostname, device_id, module_id);
-		let password = sas_token;
+
+		let (password, certificate) = match authentication {
+			crate::Authentication::SasToken(sas_token) => (Some(sas_token), None),
+			crate::Authentication::Certificate { der, password } => (None, Some((der, password))),
+		};
 
 		let client_id = format!("{}/{}", device_id, module_id);
 
 		let io_source = crate::IoSource::new(
-			iothub_hostname,
+			iothub_hostname.into(),
+			certificate.into(),
 			2 * keep_alive,
 			transport,
 		)?;
@@ -85,7 +88,7 @@ impl Client {
 		let mut inner = mqtt::Client::new(
 			Some(client_id),
 			Some(username),
-			Some(password),
+			password,
 			will,
 			io_source,
 			max_back_off,

@@ -6,6 +6,7 @@ use futures::Future;
 pub struct IoSource {
 	iothub_hostname: std::sync::Arc<str>,
 	iothub_host: std::net::SocketAddr,
+	certificate: std::sync::Arc<Option<(Vec<u8>, String)>>,
 	timeout: std::time::Duration,
 	extra: IoSourceExtra,
 }
@@ -23,6 +24,7 @@ impl IoSource {
 	#[allow(clippy::new_ret_no_self)] // Clippy bug
 	pub(crate) fn new(
 		iothub_hostname: std::sync::Arc<str>,
+		certificate: std::sync::Arc<Option<(Vec<u8>, String)>>,
 		timeout: std::time::Duration,
 		transport: crate::Transport,
 	) -> Result<Self, crate::CreateClientError> {
@@ -55,6 +57,7 @@ impl IoSource {
 		Ok(IoSource {
 			iothub_hostname,
 			iothub_host,
+			certificate,
 			timeout,
 			extra,
 		})
@@ -67,6 +70,7 @@ impl mqtt::IoSource for IoSource {
 
 	fn connect(&mut self) -> Self::Future {
 		let iothub_hostname = self.iothub_hostname.clone();
+		let certificate = self.certificate.clone();
 		let timeout = self.timeout;
 		let extra = self.extra.clone();
 
@@ -91,7 +95,16 @@ impl mqtt::IoSource for IoSource {
 				let mut stream = tokio_io_timeout::TimeoutStream::new(stream);
 				stream.set_read_timeout(Some(timeout));
 
-				let connector = native_tls::TlsConnector::new().unwrap();
+				let mut tls_connector_builder = native_tls::TlsConnector::builder();
+				if let Some((der, password)) = &*certificate {
+					let identity =
+						native_tls::Identity::from_pkcs12(der, password)
+						.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, format!("could not parse client certificate: {}", err)))?;
+					tls_connector_builder.identity(identity);
+				}
+				let connector =
+					tls_connector_builder.build()
+					.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, format!("could not create TLS connector: {}", err)))?;
 				let connector: tokio_tls::TlsConnector = connector.into();
 
 				Ok(
