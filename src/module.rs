@@ -142,6 +142,8 @@ impl Stream for Client {
 						log::warn!("Discarding message that could not be parsed: {}", err),
 				},
 
+				futures::Async::Ready(Some(mqtt::Event::SubscriptionUpdates(_))) => (),
+
 				futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
 
 				futures::Async::NotReady => return Ok(futures::Async::NotReady),

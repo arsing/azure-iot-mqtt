@@ -24,6 +24,9 @@ pub struct Client {
 enum State {
 	BeginBackOff,
 	EndBackOff(tokio::timer::Delay),
+	WaitingForSubscriptions {
+		reset_session: bool,
+	},
 	BeginSendingGetRequest,
 	EndSendingGetRequest(Box<dyn Future<Item = (), Error = mqtt::PublishError> + Send>),
 	WaitingForGetResponse(tokio::timer::Delay),
@@ -131,7 +134,7 @@ impl Client {
 			current_back_off: std::time::Duration::from_secs(0),
 			c2d_prefix,
 
-			state: State::BeginSendingGetRequest,
+			state: State::WaitingForSubscriptions { reset_session: true },
 
 			direct_method_response_send,
 			direct_method_response_recv,
@@ -205,11 +208,45 @@ impl Stream for Client {
 								log::warn!("Discarding message that could not be parsed: {}", err),
 						},
 
+						// Don't expect any subscription updates at this point
+						futures::Async::Ready(Some(mqtt::Event::SubscriptionUpdates(_))) => unreachable!(),
+
 						futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
 
 						futures::Async::NotReady => return Ok(futures::Async::NotReady),
 					},
 				},
+
+				State::WaitingForSubscriptions { reset_session } =>
+					if *reset_session {
+						match self.inner.poll()? {
+							futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => (),
+
+							futures::Async::Ready(Some(mqtt::Event::Publication(publication))) => match Message::parse(publication, &self.c2d_prefix) {
+								Ok(message @ Message::CloudToDevice(_)) |
+								Ok(message @ Message::DirectMethod { .. }) => return Ok(futures::Async::Ready(Some(message))),
+
+								Ok(message @ Message::TwinInitial(_)) |
+								Ok(message @ Message::TwinPatch(_)) =>
+									log::debug!("Discarding message {:?} because we haven't sent the GET request yet", message),
+
+								Err(err) =>
+									log::warn!("Discarding message that could not be parsed: {}", err),
+							},
+
+							futures::Async::Ready(Some(mqtt::Event::SubscriptionUpdates(_))) => {
+								log::debug!("subscriptions acked by server");
+								self.state = State::BeginSendingGetRequest;
+							},
+
+							futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
+
+							futures::Async::NotReady => return Ok(futures::Async::NotReady),
+						}
+					}
+					else {
+						self.state = State::BeginSendingGetRequest;
+					},
 
 				State::BeginSendingGetRequest =>
 					self.state = State::EndSendingGetRequest(Box::new(self.inner.publish(mqtt::proto::Publication {
@@ -226,8 +263,16 @@ impl Stream for Client {
 					},
 
 					Ok(futures::Async::NotReady) => match self.inner.poll()? {
-						// Inner client hasn't sent the GET request yet, so there's nothing for this client to do
-						futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => (),
+						futures::Async::Ready(Some(mqtt::Event::NewConnection { reset_session })) =>
+							// Inner client hasn't processed the GET request yet.
+							//
+							// If the session has been reset, then we need to wait for the resubscription, then resend the request.
+							//
+							// If the session hasn't been reset, then there's no need to go back to BeginSendingGetRequest.
+							// Just continue waiting for the client to process and send this one.
+							if reset_session {
+								self.state = State::WaitingForSubscriptions { reset_session };
+							},
 
 						futures::Async::Ready(Some(mqtt::Event::Publication(publication))) => match Message::parse(publication, &self.c2d_prefix) {
 							Ok(message @ Message::CloudToDevice(_)) |
@@ -241,6 +286,9 @@ impl Stream for Client {
 								log::warn!("Discarding message that could not be parsed: {}", err),
 						},
 
+						// Don't expect any subscription updates at this point
+						futures::Async::Ready(Some(mqtt::Event::SubscriptionUpdates(_))) => unreachable!(),
+
 						futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
 
 						futures::Async::NotReady => return Ok(futures::Async::NotReady),
@@ -252,9 +300,9 @@ impl Stream for Client {
 
 				State::WaitingForGetResponse(timer) => {
 					match self.inner.poll()? {
-						futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => {
+						futures::Async::Ready(Some(mqtt::Event::NewConnection { reset_session })) => {
 							log::warn!("Connection reset while waiting for GET response. Resending GET request...");
-							self.state = State::BeginSendingGetRequest;
+							self.state = State::WaitingForSubscriptions { reset_session };
 							continue;
 						},
 
@@ -283,6 +331,9 @@ impl Stream for Client {
 								continue;
 							},
 						},
+
+						// Don't expect any subscription updates at this point
+						futures::Async::Ready(Some(mqtt::Event::SubscriptionUpdates(_))) => unreachable!(),
 
 						futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
 
@@ -320,9 +371,9 @@ impl Stream for Client {
 				},
 
 				State::HaveGetResponse { previous_version } => match self.inner.poll()? {
-					futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => {
+					futures::Async::Ready(Some(mqtt::Event::NewConnection { reset_session })) => {
 						log::warn!("Connection reset. Resending GET request...");
-						self.state = State::BeginSendingGetRequest;
+						self.state = State::WaitingForSubscriptions { reset_session };
 					},
 
 					futures::Async::Ready(Some(mqtt::Event::Publication(publication))) => match Message::parse(publication, &self.c2d_prefix) {
@@ -348,6 +399,9 @@ impl Stream for Client {
 							log::warn!("Discarding message that could not be parsed: {}", err),
 					},
 
+					// Don't expect any subscription updates at this point
+					futures::Async::Ready(Some(mqtt::Event::SubscriptionUpdates(_))) => unreachable!(),
+
 					futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
 
 					futures::Async::NotReady => return Ok(futures::Async::NotReady),
@@ -362,6 +416,7 @@ impl std::fmt::Debug for State {
 		match self {
 			State::BeginBackOff => f.debug_struct("BeginBackOff").finish(),
 			State::EndBackOff(_) => f.debug_struct("EndBackOff").finish(),
+			State::WaitingForSubscriptions { reset_session } => f.debug_struct("WaitingForSubscriptions").field("reset_session", reset_session).finish(),
 			State::BeginSendingGetRequest => f.debug_struct("BeginSendingGetRequest").finish(),
 			State::EndSendingGetRequest(_) => f.debug_struct("EndSendingGetRequest").finish(),
 			State::WaitingForGetResponse(_) => f.debug_struct("WaitingForGetResponse").finish(),
