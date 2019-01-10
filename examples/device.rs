@@ -1,3 +1,10 @@
+// An example device client.
+//
+// - Connects to an Azure IoT Hub using bare TLS or WebSockets.
+// - Responds to direct method requests by returning the same payload.
+// - Reports twin state once at start, then updates it periodically after.
+//
+//
 // Example:
 //
 //     cargo run --example device -- --device-id <> --iothub-hostname <> --sas-token <> --use-websocket --will 'azure-iot-mqtt client unexpectedly disconnected'
@@ -55,6 +62,14 @@ struct Options {
 		parse(try_from_str = "common::duration_from_secs_str"),
 	)]
 	keep_alive: std::time::Duration,
+
+	#[structopt(
+		help = "Interval at which the client reports its twin state to the server, in seconds.",
+		long = "report-twin-state-period",
+		default_value = "5",
+		parse(try_from_str = "common::duration_from_secs_str"),
+	)]
+	report_twin_state_period: std::time::Duration,
 }
 
 fn main() {
@@ -70,6 +85,7 @@ fn main() {
 		will,
 		max_back_off,
 		keep_alive,
+		report_twin_state_period,
 	} = structopt::StructOpt::from_args();
 
 	let authentication = common::parse_authentication(sas_token, certificate_file, certificate_file_password);
@@ -101,6 +117,31 @@ fn main() {
 		}));
 
 	let direct_method_response_handle = client.direct_method_response_handle();
+
+	let report_twin_state_handle = client.report_twin_state_handle();
+
+	runtime.spawn(
+		report_twin_state_handle.report_twin_state(azure_iot_mqtt::device::ReportTwinStateRequest::Replace(
+			vec![("start-time".to_string(), chrono::Utc::now().to_string().into())].into_iter().collect()
+		))
+		.then(|result| {
+			let _ = result.expect("couldn't report initial twin state");
+			Ok(())
+		})
+		.and_then(move |()|
+			tokio::timer::Interval::new(std::time::Instant::now(), report_twin_state_period)
+			.then(move |result| {
+				let _ = result.expect("timer failed");
+
+				report_twin_state_handle.report_twin_state(azure_iot_mqtt::device::ReportTwinStateRequest::Patch(
+					vec![("current-time".to_string(), chrono::Utc::now().to_string().into())].into_iter().collect()
+				))
+				.then(|result| {
+					let _ = result.expect("couldn't report twin state patch");
+					Ok(())
+				})
+			})
+			.for_each(Ok)));
 
 	let f = client.for_each(move |message| {
 		log::info!("received message {:?}", message);

@@ -71,6 +71,9 @@ pub enum Status {
 	/// 200
 	Ok,
 
+	/// 204
+	NoContent,
+
 	/// 400
 	BadRequest,
 
@@ -89,6 +92,7 @@ impl std::fmt::Display for Status {
 		#[allow(clippy::match_same_arms)]
 		match self {
 			Status::Ok => write!(f, "200"),
+			Status::NoContent => write!(f, "204"),
 			Status::BadRequest => write!(f, "400"),
 			Status::TooManyRequests => write!(f, "429"),
 			Status::Error(raw) => write!(f, "{}", raw),
@@ -103,6 +107,7 @@ impl std::str::FromStr for Status {
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		Ok(match s.parse()? {
 			200 => Status::Ok,
+			204 => Status::NoContent,
 			400 => Status::BadRequest,
 			429 => Status::TooManyRequests,
 			raw if raw >= 500 && raw < 600 => Status::Error(raw),

@@ -21,6 +21,7 @@ tungstenite = "0.6"
 url = "1.7"
 
 [dev-dependencies]
+chrono = "0.4"
 env_logger = "0.6"
 structopt = "0.2"
 structopt-derive = "0.2"
