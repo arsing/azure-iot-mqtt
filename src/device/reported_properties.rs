@@ -155,7 +155,8 @@ impl State {
 							diff(&previous_twin_state, &self.current_twin_state)
 						}
 						else {
-							self.current_twin_state.clone()
+							// Wait for desired_properties to provide the initial reported twin state
+							return Ok(super::Response::NotReady);
 						};
 					let payload = serde_json::to_vec(&patch).expect("cannot fail to serialize HashMap<String, serde_json::Value>");
 
@@ -187,6 +188,12 @@ impl State {
 	}
 
 	pub (super) fn new_connection(&mut self) {
+		self.previous_twin_state = None;
+		self.inner = Inner::SendRequest;
+	}
+
+	pub(super) fn set_initial_state(&mut self, state: std::collections::HashMap<String, serde_json::Value>) {
+		self.previous_twin_state = Some(state);
 		self.inner = Inner::SendRequest;
 	}
 

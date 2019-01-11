@@ -250,7 +250,13 @@ impl Stream for Client {
 					};
 
 					match self.desired_properties.poll(&mut self.inner, &mut message, &mut self.previous_request_id) {
-						Ok(Response::Message(message)) => return Ok(futures::Async::Ready(Some(message))),
+						Ok(Response::Message(message)) => {
+							if let crate::device::Message::TwinInitial(twin_state) = &message {
+								self.reported_properties.set_initial_state(twin_state.reported.properties.clone());
+							}
+
+							return Ok(futures::Async::Ready(Some(message)));
+						},
 						Ok(Response::Continue) => continue_loop = true,
 						Ok(Response::NotReady) => (),
 						Err(err) => log::warn!("Discarding message that could not be parsed: {}", err),
