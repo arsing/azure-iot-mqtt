@@ -95,7 +95,7 @@ fn main() {
 
 	let client = azure_iot_mqtt::device::Client::new(
 		iothub_hostname,
-		device_id,
+		&device_id,
 		authentication,
 		if use_websocket { azure_iot_mqtt::Transport::WebSocket } else { azure_iot_mqtt::Transport::Tcp },
 
@@ -121,7 +121,7 @@ fn main() {
 	let report_twin_state_handle = client.report_twin_state_handle();
 
 	runtime.spawn(
-		report_twin_state_handle.report_twin_state(azure_iot_mqtt::device::ReportTwinStateRequest::Replace(
+		report_twin_state_handle.report_twin_state(azure_iot_mqtt::ReportTwinStateRequest::Replace(
 			vec![("start-time".to_string(), chrono::Utc::now().to_string().into())].into_iter().collect()
 		))
 		.then(|result| {
@@ -133,7 +133,7 @@ fn main() {
 			.then(move |result| {
 				let _ = result.expect("timer failed");
 
-				report_twin_state_handle.report_twin_state(azure_iot_mqtt::device::ReportTwinStateRequest::Patch(
+				report_twin_state_handle.report_twin_state(azure_iot_mqtt::ReportTwinStateRequest::Patch(
 					vec![("current-time".to_string(), chrono::Utc::now().to_string().into())].into_iter().collect()
 				))
 				.then(|result| {

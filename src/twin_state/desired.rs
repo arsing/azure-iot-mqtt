@@ -1,7 +1,7 @@
 use futures::Future;
 
 #[derive(Debug)]
-pub(super) struct State {
+pub(crate) struct State {
 	max_back_off: std::time::Duration,
 	current_back_off: std::time::Duration,
 
@@ -28,7 +28,7 @@ enum Inner {
 }
 
 impl State {
-	pub(super) fn new(
+	pub(crate) fn new(
 		max_back_off: std::time::Duration,
 		keep_alive: std::time::Duration,
 	) -> Self {
@@ -46,13 +46,13 @@ impl State {
 		clippy::unneeded_field_pattern, // Clippy wants wildcard pattern for the `if let Some(Response)` pattern below,
 		                                // which would silently allow fields to be added to the variant without adding them here
 	)]
-	pub(super) fn poll(
+	pub(crate) fn poll(
 		&mut self,
 		client: &mut mqtt::Client<crate::IoSource>,
 
-		message: &mut Option<super::InternalMessage>,
+		message: &mut Option<super::InternalTwinStateMessage>,
 		previous_request_id: &mut u8,
-	) -> Result<super::Response, super::MessageParseError> {
+	) -> Result<super::Response<Message>, super::MessageParseError> {
 		loop {
 			log::trace!("    {:?}", self.inner);
 
@@ -98,16 +98,16 @@ impl State {
 				},
 
 				Inner::WaitingForResponse { request_id, timeout } => {
-					if let Some(super::InternalMessage::Response { status, request_id: message_request_id, payload, version: _ }) = message {
+					if let Some(super::InternalTwinStateMessage::Response { status, request_id: message_request_id, payload, version: _ }) = message {
 						if *message_request_id == *request_id {
 							match status {
 								crate::Status::Ok => {
-									let twin_state: crate::device::TwinState = serde_json::from_slice(payload).map_err(super::MessageParseError::Json)?;
+									let twin_state: crate::TwinState = serde_json::from_slice(payload).map_err(super::MessageParseError::Json)?;
 
 									let _ = message.take();
 
 									self.inner = Inner::HaveResponse { version: twin_state.desired.version };
-									return Ok(super::Response::Message(crate::device::Message::TwinInitial(twin_state)));
+									return Ok(super::Response::Message(Message::Initial(twin_state)));
 								},
 
 								status @ crate::Status::TooManyRequests |
@@ -140,7 +140,7 @@ impl State {
 				},
 
 				Inner::HaveResponse { version } => match message.take() {
-					Some(super::InternalMessage::TwinPatch(twin_properties)) => {
+					Some(super::InternalTwinStateMessage::TwinPatch(twin_properties)) => {
 						if twin_properties.version != *version + 1 {
 							log::warn!("expected PATCH response with version {} but received version {}", *version + 1, twin_properties.version);
 							self.inner = Inner::SendRequest;
@@ -149,7 +149,7 @@ impl State {
 
 						*version = twin_properties.version;
 
-						return Ok(super::Response::Message(crate::device::Message::TwinPatch(twin_properties)));
+						return Ok(super::Response::Message(Message::Patch(twin_properties)));
 					},
 
 					other => {
@@ -161,7 +161,7 @@ impl State {
 		}
 	}
 
-	pub (super) fn new_connection(&mut self) {
+	pub (crate) fn new_connection(&mut self) {
 		self.inner = Inner::SendRequest;
 	}
 }
@@ -196,4 +196,11 @@ impl std::fmt::Debug for Inner {
 				.finish(),
 		}
 	}
+}
+
+#[derive(Debug)]
+pub(crate) enum Message {
+	Initial(crate::TwinState),
+
+	Patch(crate::TwinProperties),
 }

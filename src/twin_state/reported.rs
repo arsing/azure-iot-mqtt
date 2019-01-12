@@ -1,7 +1,7 @@
 use futures::{ Future, Sink, Stream };
 
 #[derive(Debug)]
-pub(super) struct State {
+pub(crate) struct State {
 	max_back_off: std::time::Duration,
 	current_back_off: std::time::Duration,
 
@@ -27,7 +27,7 @@ enum Inner {
 }
 
 impl State {
-	pub(super) fn new(
+	pub(crate) fn new(
 		max_back_off: std::time::Duration,
 		keep_alive: std::time::Duration,
 	) -> Self {
@@ -53,13 +53,13 @@ impl State {
 		clippy::unneeded_field_pattern, // Clippy wants wildcard pattern for the `if let Some(Response)` pattern below,
 		                                // which would silently allow fields to be added to the variant without adding them here
 	)]
-	pub(super) fn poll(
+	pub(crate) fn poll(
 		&mut self,
 		client: &mut mqtt::Client<crate::IoSource>,
 
-		message: &mut Option<super::InternalMessage>,
+		message: &mut Option<super::InternalTwinStateMessage>,
 		previous_request_id: &mut u8,
-	) -> Result<super::Response, super::MessageParseError> {
+	) -> Result<super::Response<Message>, super::MessageParseError> {
 		loop {
 			log::trace!("    {:?}", self.inner);
 
@@ -101,7 +101,7 @@ impl State {
 					}
 
 					if let Some((request_id, timeout)) = &mut self.pending_response {
-						if let Some(super::InternalMessage::Response { status, request_id: message_request_id, payload: _, version }) = message {
+						if let Some(super::InternalTwinStateMessage::Response { status, request_id: message_request_id, payload: _, version }) = message {
 							if *message_request_id == *request_id {
 								match status {
 									crate::Status::Ok |
@@ -113,7 +113,7 @@ impl State {
 										self.previous_twin_state = Some(self.current_twin_state.clone());
 										self.pending_response = None;
 
-										return Ok(super::Response::Message(crate::device::Message::ReportedTwinState(version)));
+										return Ok(super::Response::Message(Message::Reported(version)));
 									},
 
 									status @ crate::Status::TooManyRequests |
@@ -187,17 +187,17 @@ impl State {
 		}
 	}
 
-	pub (super) fn new_connection(&mut self) {
+	pub (crate) fn new_connection(&mut self) {
 		self.previous_twin_state = None;
 		self.inner = Inner::SendRequest;
 	}
 
-	pub(super) fn set_initial_state(&mut self, state: std::collections::HashMap<String, serde_json::Value>) {
+	pub(crate) fn set_initial_state(&mut self, state: std::collections::HashMap<String, serde_json::Value>) {
 		self.previous_twin_state = Some(state);
 		self.inner = Inner::SendRequest;
 	}
 
-	pub(super) fn report_twin_state_handle(&self) -> ReportTwinStateHandle {
+	pub(crate) fn report_twin_state_handle(&self) -> ReportTwinStateHandle {
 		ReportTwinStateHandle(self.report_twin_state_send.clone())
 	}
 }
@@ -259,6 +259,11 @@ impl std::fmt::Display for ReportTwinStateError {
 }
 
 impl std::error::Error for ReportTwinStateError {
+}
+
+#[derive(Debug)]
+pub(crate) enum Message {
+	Reported(usize),
 }
 
 fn merge(properties: &mut std::collections::HashMap<String, serde_json::Value>, patch: std::collections::HashMap<String, serde_json::Value>) {
