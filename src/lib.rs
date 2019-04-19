@@ -7,10 +7,10 @@
 	clippy::default_trait_access,
 	clippy::doc_markdown,
 	clippy::large_enum_variant,
+	clippy::module_name_repetitions,
 	clippy::pub_enum_variant_names,
 	clippy::similar_names,
 	clippy::single_match_else,
-	clippy::stutter,
 	clippy::too_many_arguments,
 	clippy::use_self,
 )]
