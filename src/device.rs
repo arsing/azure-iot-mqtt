@@ -83,6 +83,7 @@ impl Client {
 			None,
 
 			authentication,
+			None,
 			transport,
 
 			will,

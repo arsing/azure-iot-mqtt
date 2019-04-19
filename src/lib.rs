@@ -174,6 +174,7 @@ fn client_new(
 	module_id: Option<&str>,
 
 	authentication: crate::Authentication,
+	server_root_certificate: Option<native_tls::Certificate>,
 	transport: crate::Transport,
 
 	will: Option<Vec<u8>>,
@@ -217,6 +218,7 @@ fn client_new(
 	let io_source = crate::IoSource::new(
 		iothub_hostname.into(),
 		certificate.into(),
+		server_root_certificate,
 		2 * keep_alive,
 		transport,
 	)?;

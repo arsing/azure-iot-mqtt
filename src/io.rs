@@ -7,6 +7,7 @@ pub struct IoSource {
 	iothub_hostname: std::sync::Arc<str>,
 	iothub_host: std::net::SocketAddr,
 	certificate: std::sync::Arc<Option<(Vec<u8>, String)>>,
+	server_root_certificate: Option<native_tls::Certificate>,
 	timeout: std::time::Duration,
 	extra: IoSourceExtra,
 }
@@ -25,6 +26,7 @@ impl IoSource {
 	pub(crate) fn new(
 		iothub_hostname: std::sync::Arc<str>,
 		certificate: std::sync::Arc<Option<(Vec<u8>, String)>>,
+		server_root_certificate: Option<native_tls::Certificate>,
 		timeout: std::time::Duration,
 		transport: crate::Transport,
 	) -> Result<Self, crate::CreateClientError> {
@@ -58,6 +60,7 @@ impl IoSource {
 			iothub_hostname,
 			iothub_host,
 			certificate,
+			server_root_certificate,
 			timeout,
 			extra,
 		})
@@ -71,6 +74,7 @@ impl mqtt::IoSource for IoSource {
 	fn connect(&mut self) -> Self::Future {
 		let iothub_hostname = self.iothub_hostname.clone();
 		let certificate = self.certificate.clone();
+		let server_root_certificate = self.server_root_certificate.clone();
 		let timeout = self.timeout;
 		let extra = self.extra.clone();
 
@@ -101,6 +105,9 @@ impl mqtt::IoSource for IoSource {
 						native_tls::Identity::from_pkcs12(der, password)
 						.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, format!("could not parse client certificate: {}", err)))?;
 					tls_connector_builder.identity(identity);
+				}
+				if let Some(server_root_certificate) = server_root_certificate {
+					tls_connector_builder.add_root_certificate(server_root_certificate);
 				}
 				let connector =
 					tls_connector_builder.build()

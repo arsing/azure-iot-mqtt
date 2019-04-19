@@ -44,6 +44,9 @@ struct Options {
 	)]
 	certificate_file_password: Option<String>,
 
+	#[structopt(help = "Path of trusted server root certificate file (PEM)", long = "server-root-certificate-file", parse(from_os_str))]
+	server_root_certificate_file: Option<std::path::PathBuf>,
+
 	#[structopt(help = "Whether to use websockets or bare TLS to connect to the Iot Hub", long = "use-websocket")]
 	use_websocket: bool,
 
@@ -85,6 +88,7 @@ fn main() {
 		sas_token,
 		certificate_file,
 		certificate_file_password,
+		server_root_certificate_file,
 		use_websocket,
 		will,
 		max_back_off,
@@ -94,6 +98,14 @@ fn main() {
 
 	let authentication = common::parse_authentication(sas_token, certificate_file, certificate_file_password);
 
+	let server_root_certificate =
+		server_root_certificate_file.map(|server_root_certificate_file| {
+			let mut server_root_certificate_file = std::fs::File::open(server_root_certificate_file).expect("could not open server certificate file");
+			let mut server_root_certificate = vec![];
+			std::io::Read::read_to_end(&mut server_root_certificate_file, &mut server_root_certificate).expect("could not read server certificate file");
+			native_tls::Certificate::from_pem(&server_root_certificate).expect("could not parse server certificate file")
+		});
+
 	let mut runtime = tokio::runtime::Runtime::new().expect("couldn't initialize tokio runtime");
 	let executor = runtime.executor();
 
@@ -102,6 +114,7 @@ fn main() {
 		&device_id,
 		&module_id,
 		authentication,
+		server_root_certificate,
 		if use_websocket { azure_iot_mqtt::Transport::WebSocket } else { azure_iot_mqtt::Transport::Tcp },
 
 		will.map(String::into_bytes),
