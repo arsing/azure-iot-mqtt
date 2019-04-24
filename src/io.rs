@@ -6,7 +6,7 @@ use futures::Future;
 pub struct IoSource {
 	iothub_hostname: std::sync::Arc<str>,
 	iothub_host: std::net::SocketAddr,
-	certificate: std::sync::Arc<Option<(Vec<u8>, String)>>,
+	authentication: crate::Authentication,
 	server_root_certificate: Option<native_tls::Certificate>,
 	timeout: std::time::Duration,
 	extra: IoSourceExtra,
@@ -25,7 +25,7 @@ impl IoSource {
 	#[allow(clippy::new_ret_no_self)] // Clippy bug
 	pub(crate) fn new(
 		iothub_hostname: std::sync::Arc<str>,
-		certificate: std::sync::Arc<Option<(Vec<u8>, String)>>,
+		authentication: crate::Authentication,
 		server_root_certificate: Option<native_tls::Certificate>,
 		timeout: std::time::Duration,
 		transport: crate::Transport,
@@ -59,7 +59,7 @@ impl IoSource {
 		Ok(IoSource {
 			iothub_hostname,
 			iothub_host,
-			certificate,
+			authentication,
 			server_root_certificate,
 			timeout,
 			extra,
@@ -67,18 +67,59 @@ impl IoSource {
 	}
 }
 
+url::define_encode_set! {
+    pub IOTHUB_ENCODE_SET = [url::percent_encoding::PATH_SEGMENT_ENCODE_SET] | { '=' }
+}
+
 impl mqtt::IoSource for IoSource {
 	type Io = Io<tokio_tls::TlsStream<tokio_io_timeout::TimeoutStream<tokio::net::TcpStream>>>;
-	type Future = Box<dyn Future<Item = Self::Io, Error = std::io::Error> + Send>;
+	type Future = Box<dyn Future<Item = (Self::Io, Option<String>), Error = std::io::Error> + Send>;
 
 	fn connect(&mut self) -> Self::Future {
 		let iothub_hostname = self.iothub_hostname.clone();
-		let certificate = self.certificate.clone();
 		let server_root_certificate = self.server_root_certificate.clone();
 		let timeout = self.timeout;
 		let extra = self.extra.clone();
 
-		Box::new(
+		let authentication = match &self.authentication {
+			crate::Authentication::SasKey { device_id, key, max_token_valid_duration } => match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+				Ok(since_unix_epoch) => {
+					use hmac::Mac;
+
+					let resource_uri: String =
+						url::percent_encoding::utf8_percent_encode(
+							&format!("{}/devices/{}", iothub_hostname, device_id),
+							IOTHUB_ENCODE_SET)
+						.collect();
+
+					let expiry = since_unix_epoch + *max_token_valid_duration;
+					let expiry = expiry.as_secs().to_string();
+
+					let mut mac = hmac::Hmac::<sha2::Sha256>::new_varkey(key).expect("HMAC can have invalid key length");
+					let signature_data = format!("{}\n{}", resource_uri, expiry);
+					mac.input(signature_data.as_bytes());
+					let signature = mac.result().code();
+					let signature = base64::encode(signature.as_slice());
+
+					let mut serializer = url::form_urlencoded::Serializer::new(format!("SharedAccessSignature sr={}", resource_uri));
+					serializer.append_pair("se", &expiry);
+					serializer.append_pair("sig", &signature);
+
+					futures::future::ok((Some(serializer.finish()), None))
+				},
+
+				Err(err) => futures::future::err(std::io::Error::new(std::io::ErrorKind::Other, format!("could not get current time: {}", err))),
+			},
+
+			crate::Authentication::SasToken(sas_token) => futures::future::ok((Some(sas_token.to_owned()), None)),
+
+			crate::Authentication::Certificate { der, password } => match native_tls::Identity::from_pkcs12(der, password) {
+				Ok(identity) => futures::future::ok((None, Some(identity))),
+				Err(err) => futures::future::err(std::io::Error::new(std::io::ErrorKind::Other, format!("could not parse client certificate: {}", err))),
+			},
+		};
+
+		let stream =
 			tokio::timer::Timeout::new(tokio::net::TcpStream::connect(&self.iothub_host), timeout)
 			.map_err(|err|
 				if err.is_inner() {
@@ -92,18 +133,18 @@ impl mqtt::IoSource for IoSource {
 				}
 				else {
 					panic!("unreachable error: {}", err);
-				})
-			.and_then(move |stream| {
+				});
+
+		Box::new(
+			authentication.join(stream)
+			.and_then(move |((password, identity), stream)| {
 				stream.set_nodelay(true)?;
 
 				let mut stream = tokio_io_timeout::TimeoutStream::new(stream);
 				stream.set_read_timeout(Some(timeout));
 
 				let mut tls_connector_builder = native_tls::TlsConnector::builder();
-				if let Some((der, password)) = &*certificate {
-					let identity =
-						native_tls::Identity::from_pkcs12(der, password)
-						.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, format!("could not parse client certificate: {}", err)))?;
+				if let Some(identity) = identity {
 					tls_connector_builder.identity(identity);
 				}
 				if let Some(server_root_certificate) = server_root_certificate {
@@ -116,11 +157,15 @@ impl mqtt::IoSource for IoSource {
 
 				Ok(
 					connector.connect(&iothub_hostname, stream)
-					.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err)))
+					.then(|stream| {
+						let stream = stream.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+						Ok((stream, password))
+					})
+				)
 			})
 			.flatten()
-			.and_then(move |stream| match extra {
-				IoSourceExtra::Raw => futures::future::Either::A(futures::future::ok(Io::Raw(stream))),
+			.and_then(|(stream, password)| match extra {
+				IoSourceExtra::Raw => futures::future::Either::A(futures::future::ok((Io::Raw(stream), password))),
 
 				IoSourceExtra::WebSocket { url } => {
 					let request = tungstenite::handshake::client::Request {
@@ -132,10 +177,10 @@ impl mqtt::IoSource for IoSource {
 
 					let handshake = tungstenite::ClientHandshake::start(stream, request, None);
 
-					futures::future::Either::B(WsConnect::Handshake(handshake).map(|stream| Io::WebSocket {
+					futures::future::Either::B(WsConnect::Handshake(handshake).map(|stream| (Io::WebSocket {
 						inner: stream,
 						pending_read: std::io::Cursor::new(vec![]),
-					}))
+					}, password)))
 				},
 			}))
 	}

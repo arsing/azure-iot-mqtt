@@ -7,7 +7,8 @@
 //
 // Example:
 //
-//     cargo run --example device -- --device-id <> --iothub-hostname <> --sas-token <> --use-websocket --will 'azure-iot-mqtt client unexpectedly disconnected'
+//     cargo run --example device -- \
+//         --device-id <> --iothub-hostname <> --sas-key <> --sas-key-token-valid-time 600 --use-websocket --will 'azure-iot-mqtt client unexpectedly disconnected'
 
 use futures::{ Future, Stream };
 
@@ -21,6 +22,17 @@ struct Options {
 
 	#[structopt(help = "IoT Hub hostname (eg foo.azure-devices.net)", long = "iothub-hostname")]
 	iothub_hostname: String,
+
+	#[structopt(help = "SAS key for token authentication, in base64 format", long = "sas-key", group = "authentication", requires = "sas_key_token_valid_time")]
+	sas_key: Option<String>,
+
+	#[structopt(
+		help = "The maximum time that a SAS token generated from the SAS key should be valid for, in seconds",
+		long = "sas-key-token-valid-time",
+		requires = "sas_key",
+		parse(try_from_str = "common::duration_from_secs_str"),
+	)]
+	sas_key_token_valid_time: Option<std::time::Duration>,
 
 	#[structopt(help = "SAS token for token authentication", long = "sas-token", group = "authentication")]
 	sas_token: Option<String>,
@@ -78,6 +90,8 @@ fn main() {
 	let Options {
 		device_id,
 		iothub_hostname,
+		sas_key,
+		sas_key_token_valid_time,
 		sas_token,
 		certificate_file,
 		certificate_file_password,
@@ -88,7 +102,14 @@ fn main() {
 		report_twin_state_period,
 	} = structopt::StructOpt::from_args();
 
-	let authentication = common::parse_authentication(sas_token, certificate_file, certificate_file_password);
+	let authentication =
+		common::parse_authentication(
+			&device_id,
+			sas_key,
+			sas_key_token_valid_time,
+			sas_token,
+			certificate_file,
+			certificate_file_password);
 
 	let mut runtime = tokio::runtime::Runtime::new().expect("couldn't initialize tokio runtime");
 	let executor = runtime.executor();

@@ -5,7 +5,9 @@ authors = ["Arnav Singh <arsing@microsoft.com>"]
 edition = "2018"
 
 [dependencies]
+base64 = "0.10"
 futures = "0.1"
+hmac = "0.7"
 lazy_static = "1.2"
 log = "0.4"
 mqtt = { path = "../mqtt" }
@@ -14,6 +16,7 @@ regex = "1.1"
 serde = "1.0"
 serde_derive = "1.0"
 serde_json = "1.0"
+sha2 = "0.8"
 tokio = "0.1"
 tokio-io-timeout = "0.3"
 tokio-tls = "0.2"

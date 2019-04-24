@@ -96,7 +96,7 @@ fn main() {
 		report_twin_state_period,
 	} = structopt::StructOpt::from_args();
 
-	let authentication = common::parse_authentication(sas_token, certificate_file, certificate_file_password);
+	let authentication = common::parse_authentication(&device_id, None, None, sas_token, certificate_file, certificate_file_password);
 
 	let server_root_certificate =
 		server_root_certificate_file.map(|server_root_certificate_file| {

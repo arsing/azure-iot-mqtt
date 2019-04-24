@@ -5,14 +5,23 @@ pub(crate) fn authentication_group() -> structopt::clap::ArgGroup<'static> {
 }
 
 pub(crate) fn parse_authentication(
+	device_id: &str,
+	sas_key: Option<String>,
+	sas_key_token_valid_time: Option<std::time::Duration>,
 	sas_token: Option<String>,
 	certificate_file: Option<std::path::PathBuf>,
 	certificate_file_password: Option<String>,
 ) -> azure_iot_mqtt::Authentication {
-	match (sas_token, certificate_file, certificate_file_password) {
-		(Some(sas_token), None, None) => azure_iot_mqtt::Authentication::SasToken(sas_token),
+	match (sas_key, sas_key_token_valid_time, sas_token, certificate_file, certificate_file_password) {
+		(Some(sas_key), Some(sas_key_token_valid_time), None, None, None) => azure_iot_mqtt::Authentication::SasKey {
+			device_id: device_id.to_owned(),
+			key: base64::decode(&sas_key).expect("could not parse SAS key"),
+			max_token_valid_duration: sas_key_token_valid_time,
+		},
 
-		(None, Some(certificate_file), Some(certificate_file_password)) => {
+		(None, None, Some(sas_token), None, None) => azure_iot_mqtt::Authentication::SasToken(sas_token),
+
+		(None, None, None, Some(certificate_file), Some(certificate_file_password)) => {
 			let certificate_file_display = certificate_file.display().to_string();
 
 			let mut certificate_file = match std::fs::File::open(certificate_file) {

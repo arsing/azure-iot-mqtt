@@ -33,6 +33,12 @@ pub use self::twin_state::{ ReportTwinStateHandle, ReportTwinStateRequest, TwinP
 /// The type of authentication the client should use to connect to the Azure IoT Hub
 #[derive(Debug)]
 pub enum Authentication {
+	SasKey {
+		device_id: String,
+		key: Vec<u8>,
+		max_token_valid_duration: std::time::Duration,
+	},
+
 	SasToken(String),
 
 	Certificate {
@@ -198,11 +204,6 @@ fn client_new(
 			format!("{}/{}/?api-version=2018-06-30", iothub_hostname, device_id)
 		};
 
-	let (password, certificate) = match authentication {
-		crate::Authentication::SasToken(sas_token) => (Some(sas_token), None),
-		crate::Authentication::Certificate { der, password } => (None, Some((der, password))),
-	};
-
 	let will = match (will, module_id.as_ref()) {
 		(Some(payload), Some(module_id)) => Some((format!("devices/{}/modules/{}/messages/events/", device_id, module_id), payload)),
 		(Some(payload), None) => Some((format!("devices/{}/messages/events/", device_id), payload)),
@@ -217,7 +218,7 @@ fn client_new(
 
 	let io_source = crate::IoSource::new(
 		iothub_hostname.into(),
-		certificate.into(),
+		authentication,
 		server_root_certificate,
 		2 * keep_alive,
 		transport,
@@ -226,7 +227,6 @@ fn client_new(
 	let mut inner = mqtt::Client::new(
 		Some(client_id),
 		Some(username),
-		password,
 		will,
 		io_source,
 		max_back_off,
