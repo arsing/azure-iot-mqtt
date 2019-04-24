@@ -33,16 +33,22 @@ pub use self::twin_state::{ ReportTwinStateHandle, ReportTwinStateRequest, TwinP
 /// The type of authentication the client should use to connect to the Azure IoT Hub
 #[derive(Debug)]
 pub enum Authentication {
+	/// The device ID and SAS key are used to generate a new SAS token for every connection attempt.
+	/// Each token expires `max_token_valid_duration` time after the connection attempt.
 	SasKey {
 		device_id: String,
 		key: Vec<u8>,
 		max_token_valid_duration: std::time::Duration,
 	},
 
+	/// SAS token to be used directly
 	SasToken(String),
 
+	/// Client certificate
 	Certificate {
+		/// PKCS12 certificate with private key
 		der: Vec<u8>,
+		/// Password to decrypt the private key
 		password: String,
 	},
 }
