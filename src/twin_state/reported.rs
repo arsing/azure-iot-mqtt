@@ -11,7 +11,7 @@ pub(crate) struct State {
 	report_twin_state_recv: futures::sync::mpsc::Receiver<ReportTwinStateRequest>,
 	previous_twin_state: Option<std::collections::HashMap<String, serde_json::Value>>,
 	current_twin_state: std::collections::HashMap<String, serde_json::Value>,
-	pending_response: Option<(u8, tokio::timer::Delay)>,
+	pending_response: Option<(u8, tokio_timer::Delay)>,
 
 	inner: Inner,
 }
@@ -19,7 +19,7 @@ pub(crate) struct State {
 enum Inner {
 	BeginBackOff,
 
-	EndBackOff(tokio::timer::Delay),
+	EndBackOff(tokio_timer::Delay),
 
 	Idle,
 
@@ -74,7 +74,7 @@ impl State {
 						log::debug!("Backing off for {:?}", back_off);
 						let back_off_deadline = std::time::Instant::now() + back_off;
 						self.current_back_off = std::cmp::min(self.max_back_off, self.current_back_off * 2);
-						self.inner = Inner::EndBackOff(tokio::timer::Delay::new(back_off_deadline));
+						self.inner = Inner::EndBackOff(tokio_timer::Delay::new(back_off_deadline));
 					},
 				},
 
@@ -175,7 +175,7 @@ impl State {
 					});
 
 					let deadline = std::time::Instant::now() + 2 * self.keep_alive;
-					let timeout = tokio::timer::Delay::new(deadline);
+					let timeout = tokio_timer::Delay::new(deadline);
 
 					self.pending_response = Some((request_id, timeout));
 

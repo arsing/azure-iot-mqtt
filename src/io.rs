@@ -72,7 +72,7 @@ url::define_encode_set! {
 }
 
 impl mqtt::IoSource for IoSource {
-	type Io = Io<tokio_tls::TlsStream<tokio_io_timeout::TimeoutStream<tokio::net::TcpStream>>>;
+	type Io = Io<tokio_tls::TlsStream<tokio_io_timeout::TimeoutStream<tokio_tcp::TcpStream>>>;
 	type Future = Box<dyn Future<Item = (Self::Io, Option<String>), Error = std::io::Error> + Send>;
 
 	fn connect(&mut self) -> Self::Future {
@@ -120,7 +120,7 @@ impl mqtt::IoSource for IoSource {
 		};
 
 		let stream =
-			tokio::timer::Timeout::new(tokio::net::TcpStream::connect(&self.iothub_host), timeout)
+			tokio_timer::Timeout::new(tokio_tcp::TcpStream::connect(&self.iothub_host), timeout)
 			.map_err(|err|
 				if err.is_inner() {
 					err.into_inner().unwrap()
@@ -242,9 +242,9 @@ pub enum Io<S> {
 	},
 }
 
-impl<S> std::io::Read for Io<S> where S: tokio::io::AsyncRead + std::io::Write {
+impl<S> std::io::Read for Io<S> where S: tokio_io::AsyncRead + std::io::Write {
 	fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-		use tokio::io::AsyncRead;
+		use tokio_io::AsyncRead;
 
 		match self.poll_read(buf)? {
 			futures::Async::Ready(read) => Ok(read),
@@ -253,7 +253,7 @@ impl<S> std::io::Read for Io<S> where S: tokio::io::AsyncRead + std::io::Write {
 	}
 }
 
-impl<S> tokio::io::AsyncRead for Io<S> where S: tokio::io::AsyncRead + std::io::Write {
+impl<S> tokio_io::AsyncRead for Io<S> where S: tokio_io::AsyncRead + std::io::Write {
 	fn poll_read(&mut self, buf: &mut [u8]) -> futures::Poll<usize, std::io::Error> {
 		use std::io::Read;
 
@@ -287,9 +287,9 @@ impl<S> tokio::io::AsyncRead for Io<S> where S: tokio::io::AsyncRead + std::io::
 	}
 }
 
-impl<S> std::io::Write for Io<S> where S: std::io::Read + tokio::io::AsyncWrite {
+impl<S> std::io::Write for Io<S> where S: std::io::Read + tokio_io::AsyncWrite {
 	fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-		use tokio::io::AsyncWrite;
+		use tokio_io::AsyncWrite;
 
 		match self.poll_write(buf)? {
 			futures::Async::Ready(written) => Ok(written),
@@ -298,7 +298,7 @@ impl<S> std::io::Write for Io<S> where S: std::io::Read + tokio::io::AsyncWrite 
 	}
 
 	fn flush(&mut self) -> std::io::Result<()> {
-		use tokio::io::AsyncWrite;
+		use tokio_io::AsyncWrite;
 
 		match self.poll_flush()? {
 			futures::Async::Ready(()) => Ok(()),
@@ -307,7 +307,7 @@ impl<S> std::io::Write for Io<S> where S: std::io::Read + tokio::io::AsyncWrite 
 	}
 }
 
-impl<S> tokio::io::AsyncWrite for Io<S> where S: std::io::Read + tokio::io::AsyncWrite {
+impl<S> tokio_io::AsyncWrite for Io<S> where S: std::io::Read + tokio_io::AsyncWrite {
 	fn shutdown(&mut self) -> futures::Poll<(), std::io::Error> {
 		let inner = match self {
 			Io::Raw(stream) => return stream.shutdown(),

@@ -13,13 +13,13 @@ pub(crate) struct State {
 enum Inner {
 	BeginBackOff,
 
-	EndBackOff(tokio::timer::Delay),
+	EndBackOff(tokio_timer::Delay),
 
 	SendRequest,
 
 	WaitingForResponse {
 		request_id: u8,
-		timeout: tokio::timer::Delay,
+		timeout: tokio_timer::Delay,
 	},
 
 	HaveResponse {
@@ -67,7 +67,7 @@ impl State {
 						log::debug!("Backing off for {:?}", back_off);
 						let back_off_deadline = std::time::Instant::now() + back_off;
 						self.current_back_off = std::cmp::min(self.max_back_off, self.current_back_off * 2);
-						self.inner = Inner::EndBackOff(tokio::timer::Delay::new(back_off_deadline));
+						self.inner = Inner::EndBackOff(tokio_timer::Delay::new(back_off_deadline));
 					},
 				},
 
@@ -92,7 +92,7 @@ impl State {
 					});
 
 					let deadline = std::time::Instant::now() + 2 * self.keep_alive;
-					let timeout = tokio::timer::Delay::new(deadline);
+					let timeout = tokio_timer::Delay::new(deadline);
 					self.inner = Inner::WaitingForResponse { request_id, timeout };
 					return Ok(super::Response::Continue);
 				},
