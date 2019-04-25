@@ -83,7 +83,6 @@ impl Client {
 			None,
 
 			authentication,
-			None,
 			transport,
 
 			will,
@@ -277,7 +276,7 @@ pub enum Message {
 	},
 
 	/// The server acknowledged a report of the twin state. Contains the version number of the updated section.
-	ReportedTwinState(usize),
+	ReportedTwinState(Option<usize>),
 
 	/// The full twin state, as currently stored in the Azure IoT Hub.
 	TwinInitial(crate::TwinState),

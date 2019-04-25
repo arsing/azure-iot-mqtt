@@ -106,7 +106,7 @@ impl State {
 								match status {
 									crate::Status::Ok |
 									crate::Status::NoContent => {
-										let version = (*version).ok_or(super::MessageParseError::MissingResponseVersion)?;
+										let version = *version;
 
 										let _ = message.take();
 
@@ -263,7 +263,7 @@ impl std::error::Error for ReportTwinStateError {
 
 #[derive(Debug)]
 pub(crate) enum Message {
-	Reported(usize),
+	Reported(Option<usize>),
 }
 
 fn merge(properties: &mut std::collections::HashMap<String, serde_json::Value>, patch: std::collections::HashMap<String, serde_json::Value>) {

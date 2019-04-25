@@ -7,7 +7,6 @@ pub struct IoSource {
 	iothub_hostname: std::sync::Arc<str>,
 	iothub_host: std::net::SocketAddr,
 	authentication: crate::Authentication,
-	server_root_certificate: Option<native_tls::Certificate>,
 	timeout: std::time::Duration,
 	extra: IoSourceExtra,
 }
@@ -26,7 +25,6 @@ impl IoSource {
 	pub(crate) fn new(
 		iothub_hostname: std::sync::Arc<str>,
 		authentication: crate::Authentication,
-		server_root_certificate: Option<native_tls::Certificate>,
 		timeout: std::time::Duration,
 		transport: crate::Transport,
 	) -> Result<Self, crate::CreateClientError> {
@@ -60,7 +58,6 @@ impl IoSource {
 			iothub_hostname,
 			iothub_host,
 			authentication,
-			server_root_certificate,
 			timeout,
 			extra,
 		})
@@ -76,47 +73,69 @@ impl mqtt::IoSource for IoSource {
 	type Future = Box<dyn Future<Item = (Self::Io, Option<String>), Error = std::io::Error> + Send>;
 
 	fn connect(&mut self) -> Self::Future {
+		#[allow(clippy::identity_op)]
+		const DEFAULT_MAX_TOKEN_VALID_DURATION: std::time::Duration = std::time::Duration::from_secs(1 * 60 * 60);
+
 		let iothub_hostname = self.iothub_hostname.clone();
-		let server_root_certificate = self.server_root_certificate.clone();
 		let timeout = self.timeout;
 		let extra = self.extra.clone();
 
 		let authentication = match &self.authentication {
-			crate::Authentication::SasKey { device_id, key, max_token_valid_duration } => match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-				Ok(since_unix_epoch) => {
-					use hmac::Mac;
+			crate::Authentication::SasKey { device_id, key, max_token_valid_duration, server_root_certificate } =>
+				match prepare_sas_token_request(&*iothub_hostname, device_id, None, *max_token_valid_duration) {
+					Ok((signature_data, make_sas_token)) => {
+						use hmac::Mac;
 
-					let resource_uri: String =
-						url::percent_encoding::utf8_percent_encode(
-							&format!("{}/devices/{}", iothub_hostname, device_id),
-							IOTHUB_ENCODE_SET)
-						.collect();
+						let mut mac = hmac::Hmac::<sha2::Sha256>::new_varkey(key).expect("HMAC can have invalid key length");
+						mac.input(signature_data.as_bytes());
+						let signature = mac.result().code();
+						let signature = base64::encode(signature.as_slice());
 
-					let expiry = since_unix_epoch + *max_token_valid_duration;
-					let expiry = expiry.as_secs().to_string();
+						let sas_token = make_sas_token(&signature);
 
-					let mut mac = hmac::Hmac::<sha2::Sha256>::new_varkey(key).expect("HMAC can have invalid key length");
-					let signature_data = format!("{}\n{}", resource_uri, expiry);
-					mac.input(signature_data.as_bytes());
-					let signature = mac.result().code();
-					let signature = base64::encode(signature.as_slice());
+						futures::future::Either::A(futures::future::ok((Some(sas_token), None, server_root_certificate.clone())))
+					},
 
-					let mut serializer = url::form_urlencoded::Serializer::new(format!("SharedAccessSignature sr={}", resource_uri));
-					serializer.append_pair("se", &expiry);
-					serializer.append_pair("sig", &signature);
-
-					futures::future::ok((Some(serializer.finish()), None))
+					Err(err) => futures::future::Either::A(futures::future::err(err)),
 				},
 
-				Err(err) => futures::future::err(std::io::Error::new(std::io::ErrorKind::Other, format!("could not get current time: {}", err))),
-			},
+			crate::Authentication::SasToken { token, server_root_certificate } =>
+				futures::future::Either::A(futures::future::ok((Some(token.to_owned()), None, server_root_certificate.clone()))),
 
-			crate::Authentication::SasToken(sas_token) => futures::future::ok((Some(sas_token.to_owned()), None)),
+			crate::Authentication::Certificate { der, password, server_root_certificate } =>
+				match native_tls::Identity::from_pkcs12(der, password) {
+					Ok(identity) => futures::future::Either::A(futures::future::ok((None, Some(identity), server_root_certificate.clone()))),
+					Err(err) => futures::future::Either::A(futures::future::err(
+						std::io::Error::new(std::io::ErrorKind::Other, format!("could not parse client certificate: {}", err)))),
+				},
 
-			crate::Authentication::Certificate { der, password } => match native_tls::Identity::from_pkcs12(der, password) {
-				Ok(identity) => futures::future::ok((None, Some(identity))),
-				Err(err) => futures::future::err(std::io::Error::new(std::io::ErrorKind::Other, format!("could not parse client certificate: {}", err))),
-			},
+			crate::Authentication::IotEdge { device_id, module_id, generation_id, iothub_hostname, workload_url } =>
+				match crate::iotedge_client::Client::new(workload_url) {
+					Ok(iotedge_client) => {
+						match prepare_sas_token_request(iothub_hostname, device_id, None, DEFAULT_MAX_TOKEN_VALID_DURATION) {
+							Ok((signature_data, make_sas_token)) => {
+								let signature = iotedge_client.hmac_sha256(module_id, generation_id, &signature_data);
+
+								let server_root_certificate = iotedge_client.get_server_root_certificate();
+
+								futures::future::Either::B(signature.join(server_root_certificate)
+									.then(move |result| match result {
+										Ok((signature, server_root_certificate)) => {
+											let sas_token = make_sas_token(&signature);
+											Ok((Some(sas_token), None, Some(server_root_certificate)))
+										},
+
+										Err(err) => Err(std::io::Error::new(std::io::ErrorKind::Other, err)),
+									}))
+							},
+
+							Err(err) => futures::future::Either::A(futures::future::err(err)),
+						}
+					},
+
+					Err(err) => futures::future::Either::A(futures::future::err(
+						std::io::Error::new(std::io::ErrorKind::Other, format!("could not initialize iotedge client: {}", err)))),
+				},
 		};
 
 		let stream =
@@ -137,7 +156,7 @@ impl mqtt::IoSource for IoSource {
 
 		Box::new(
 			authentication.join(stream)
-			.and_then(move |((password, identity), stream)| {
+			.and_then(move |((password, identity, server_root_certificate), stream)| {
 				stream.set_nodelay(true)?;
 
 				let mut stream = tokio_io_timeout::TimeoutStream::new(stream);
@@ -358,4 +377,40 @@ fn poll_from_tungstenite_error<T>(err: tungstenite::Error) -> futures::Poll<T, s
 		tungstenite::Error::Io(err) => Err(err),
 		err => Err(std::io::Error::new(std::io::ErrorKind::Other, err)),
 	}
+}
+
+fn prepare_sas_token_request(
+	iothub_hostname: &str,
+	device_id: &str,
+	module_id: Option<&str>,
+	max_token_valid_duration: std::time::Duration,
+) -> std::io::Result<(String, impl FnOnce(&str) -> String)> {
+	url::define_encode_set! {
+		pub IOTHUB_ENCODE_SET = [url::percent_encoding::PATH_SEGMENT_ENCODE_SET] | { '=' }
+	}
+
+	let since_unix_epoch =
+		std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+		.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, format!("could not get current time: {}", err)))?;
+
+	let resource_uri =
+		if let Some(module_id) = module_id {
+			format!("{}/devices/{}/modules/{}", iothub_hostname, device_id, module_id)
+		}
+		else {
+			format!("{}/devices/{}", iothub_hostname, device_id)
+		};
+	let resource_uri: String = url::percent_encoding::utf8_percent_encode(&resource_uri, IOTHUB_ENCODE_SET).collect();
+
+	let expiry = since_unix_epoch + max_token_valid_duration;
+	let expiry = expiry.as_secs().to_string();
+
+	let signature_data = format!("{}\n{}", resource_uri, expiry);
+
+	Ok((signature_data, move |signature: &str| {
+		let mut serializer = url::form_urlencoded::Serializer::new(format!("SharedAccessSignature sr={}", resource_uri));
+		serializer.append_pair("se", &expiry);
+		serializer.append_pair("sig", signature);
+		serializer.finish()
+	}))
 }

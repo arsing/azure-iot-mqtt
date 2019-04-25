@@ -22,6 +22,8 @@ pub mod device;
 mod io;
 pub use self::io::{ Io, IoSource, Transport };
 
+mod iotedge_client;
+
 pub mod module;
 
 mod system_properties;
@@ -31,7 +33,6 @@ mod twin_state;
 pub use self::twin_state::{ ReportTwinStateHandle, ReportTwinStateRequest, TwinProperties, TwinState };
 
 /// The type of authentication the client should use to connect to the Azure IoT Hub
-#[derive(Debug)]
 pub enum Authentication {
 	/// The device ID and SAS key are used to generate a new SAS token for every connection attempt.
 	/// Each token expires `max_token_valid_duration` time after the connection attempt.
@@ -39,10 +40,16 @@ pub enum Authentication {
 		device_id: String,
 		key: Vec<u8>,
 		max_token_valid_duration: std::time::Duration,
+		/// Trusted server root certificate, if any
+		server_root_certificate: Option<native_tls::Certificate>,
 	},
 
 	/// SAS token to be used directly
-	SasToken(String),
+	SasToken {
+		token: String,
+		/// Trusted server root certificate, if any
+		server_root_certificate: Option<native_tls::Certificate>,
+	},
 
 	/// Client certificate
 	Certificate {
@@ -50,6 +57,17 @@ pub enum Authentication {
 		der: Vec<u8>,
 		/// Password to decrypt the private key
 		password: String,
+		/// Trusted server root certificate, if any
+		server_root_certificate: Option<native_tls::Certificate>,
+	},
+
+	/// Connect as an Edge module
+	IotEdge {
+		device_id: String,
+		module_id: String,
+		generation_id: String,
+		iothub_hostname: String,
+		workload_url: url::Url,
 	},
 }
 
@@ -186,7 +204,6 @@ fn client_new(
 	module_id: Option<&str>,
 
 	authentication: crate::Authentication,
-	server_root_certificate: Option<native_tls::Certificate>,
 	transport: crate::Transport,
 
 	will: Option<Vec<u8>>,
@@ -225,7 +242,6 @@ fn client_new(
 	let io_source = crate::IoSource::new(
 		iothub_hostname.into(),
 		authentication,
-		server_root_certificate,
 		2 * keep_alive,
 		transport,
 	)?;

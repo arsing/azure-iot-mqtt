@@ -17,9 +17,13 @@ pub(crate) fn parse_authentication(
 			device_id: device_id.to_owned(),
 			key: base64::decode(&sas_key).expect("could not parse SAS key"),
 			max_token_valid_duration: sas_key_token_valid_time,
+			server_root_certificate: None,
 		},
 
-		(None, None, Some(sas_token), None, None) => azure_iot_mqtt::Authentication::SasToken(sas_token),
+		(None, None, Some(sas_token), None, None) => azure_iot_mqtt::Authentication::SasToken {
+			token: sas_token,
+			server_root_certificate: None,
+		},
 
 		(None, None, None, Some(certificate_file), Some(certificate_file_password)) => {
 			let certificate_file_display = certificate_file.display().to_string();
@@ -37,6 +41,7 @@ pub(crate) fn parse_authentication(
 			azure_iot_mqtt::Authentication::Certificate {
 				der: certificate,
 				password: certificate_file_password,
+				server_root_certificate: None,
 			}
 		},
 

@@ -48,10 +48,6 @@ impl Client {
 	///
 	///     The method this client should use to authorize with the Azure IoT Hub.
 	///
-	/// * `server_root_certificate`
-	///
-	///     If set, this server certificate will be trusted.
-	///
 	/// * `transport`
 	///
 	///     The transport to use for the connection to the Azure IoT Hub.
@@ -74,7 +70,6 @@ impl Client {
 		device_id: &str,
 		module_id: &str,
 		authentication: crate::Authentication,
-		server_root_certificate: Option<native_tls::Certificate>,
 		transport: crate::Transport,
 
 		will: Option<Vec<u8>>,
@@ -89,7 +84,6 @@ impl Client {
 			Some(module_id),
 
 			authentication,
-			server_root_certificate,
 			transport,
 
 			will,
@@ -272,7 +266,7 @@ pub enum Message {
 	},
 
 	/// The server acknowledged a report of the twin state. Contains the version number of the updated section.
-	ReportedTwinState(usize),
+	ReportedTwinState(Option<usize>),
 
 	/// The full twin state, as currently stored in the Azure IoT Hub.
 	TwinInitial(crate::TwinState),
