@@ -120,7 +120,7 @@ fn main() {
 		authentication,
 		if use_websocket { azure_iot_mqtt::Transport::WebSocket } else { azure_iot_mqtt::Transport::Tcp },
 
-		will.map(String::into_bytes),
+		will.map(Into::into),
 
 		max_back_off,
 		keep_alive,

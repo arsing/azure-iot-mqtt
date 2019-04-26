@@ -69,7 +69,7 @@ impl Client {
 		authentication: crate::Authentication,
 		transport: crate::Transport,
 
-		will: Option<Vec<u8>>,
+		will: Option<bytes::Bytes>,
 
 		max_back_off: std::time::Duration,
 		keep_alive: std::time::Duration,
@@ -140,7 +140,7 @@ impl Stream for Client {
 					topic_name: format!("$iothub/methods/res/{}/?$rid={}", status, request_id),
 					qos: mqtt::proto::QoS::AtLeastOnce,
 					retain: false,
-					payload,
+					payload: payload.into(),
 				};
 
 				if ack_sender.send(Box::new(self.inner.publish(publication))).is_err() {
@@ -317,7 +317,7 @@ impl std::error::Error for MessageParseError {
 pub struct CloudToDeviceMessage {
 	pub system_properties: crate::SystemProperties,
 	pub properties: std::collections::HashMap<String, String>,
-	pub data: Vec<u8>,
+	pub data: bytes::Bytes,
 }
 
 #[derive(Debug)]

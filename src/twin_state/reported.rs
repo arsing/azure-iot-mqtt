@@ -171,7 +171,7 @@ impl State {
 						topic_name: format!("$iothub/twin/PATCH/properties/reported/?$rid={}", request_id),
 						qos: mqtt::proto::QoS::AtMostOnce,
 						retain: false,
-						payload,
+						payload: payload.into(),
 					});
 
 					let deadline = std::time::Instant::now() + 2 * self.keep_alive;

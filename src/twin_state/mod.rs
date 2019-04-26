@@ -29,7 +29,7 @@ pub(crate) enum InternalTwinStateMessage {
 		status: crate::Status,
 		request_id: u8,
 		version: Option<usize>,
-		payload: Vec<u8>,
+		payload: bytes::Bytes,
 	},
 
 	TwinPatch(TwinProperties),

@@ -206,7 +206,7 @@ fn client_new(
 	authentication: crate::Authentication,
 	transport: crate::Transport,
 
-	will: Option<Vec<u8>>,
+	will: Option<bytes::Bytes>,
 
 	max_back_off: std::time::Duration,
 	keep_alive: std::time::Duration,
