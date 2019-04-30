@@ -10,6 +10,8 @@ use futures::Stream;
 pub struct Client {
 	inner: mqtt::Client<crate::IoSource>,
 
+	num_default_subscriptions: usize,
+
 	state: State,
 	previous_request_id: u8,
 
@@ -24,6 +26,7 @@ pub struct Client {
 enum State {
 	WaitingForSubscriptions {
 		reset_session: bool,
+		acked: usize,
 	},
 
 	Idle,
@@ -77,7 +80,7 @@ impl Client {
 		max_back_off: std::time::Duration,
 		keep_alive: std::time::Duration,
 	) -> Result<Self, crate::CreateClientError> {
-		let inner = crate::client_new(
+		let (inner, num_default_subscriptions) = crate::client_new(
 			iothub_hostname,
 
 			device_id,
@@ -97,7 +100,9 @@ impl Client {
 		Ok(Client {
 			inner,
 
-			state: State::WaitingForSubscriptions { reset_session: true },
+			num_default_subscriptions,
+
+			state: State::WaitingForSubscriptions { reset_session: true, acked: 0 },
 			previous_request_id: u8::max_value(),
 
 			desired_properties: crate::twin_state::desired::State::new(max_back_off, keep_alive),
@@ -148,7 +153,7 @@ impl Stream for Client {
 			}
 
 			match &mut self.state {
-				State::WaitingForSubscriptions { reset_session } =>
+				State::WaitingForSubscriptions { reset_session, acked } =>
 					if *reset_session {
 						match self.inner.poll()? {
 							futures::Async::Ready(Some(mqtt::Event::NewConnection { .. })) => (),
@@ -164,9 +169,13 @@ impl Stream for Client {
 									log::warn!("Discarding message that could not be parsed: {}", err),
 							},
 
-							futures::Async::Ready(Some(mqtt::Event::SubscriptionUpdates(_))) => {
-								log::debug!("subscriptions acked by server");
-								self.state = State::Idle;
+							futures::Async::Ready(Some(mqtt::Event::SubscriptionUpdates(updates))) => {
+								log::debug!("subscriptions acked by server: {:?}", updates);
+								*acked += updates.len();
+								log::debug!("waiting for {} more subscriptions", self.num_default_subscriptions - *acked);
+								if *acked == self.num_default_subscriptions {
+									self.state = State::Idle;
+								}
 							},
 
 							futures::Async::Ready(None) => return Ok(futures::Async::Ready(None)),
@@ -183,7 +192,7 @@ impl Stream for Client {
 
 					let mut twin_state_message = match self.inner.poll()? {
 						futures::Async::Ready(Some(mqtt::Event::NewConnection { reset_session })) => {
-							self.state = State::WaitingForSubscriptions { reset_session };
+							self.state = State::WaitingForSubscriptions { reset_session, acked: 0 };
 							self.desired_properties.new_connection();
 							self.reported_properties.new_connection();
 							continue;

@@ -74,6 +74,7 @@ pub enum Authentication {
 /// Errors from creating a device or module client
 #[derive(Debug)]
 pub enum CreateClientError {
+	InvalidDefaultSubscription(mqtt::UpdateSubscriptionError),
 	ResolveIotHubHostname(Option<std::io::Error>),
 	WebSocketUrl(url::ParseError),
 }
@@ -81,6 +82,7 @@ pub enum CreateClientError {
 impl std::fmt::Display for CreateClientError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
+			CreateClientError::InvalidDefaultSubscription(err) => write!(f, "could not create default MQTT subscription: {}", err),
 			CreateClientError::ResolveIotHubHostname(Some(err)) => write!(f, "could not resolve Azure IoT Hub hostname: {}", err),
 			CreateClientError::ResolveIotHubHostname(None) => write!(f, "could not resolve Azure IoT Hub hostname: no addresses found"),
 			CreateClientError::WebSocketUrl(err) => write!(f, "could not construct a valid URL for the Azure IoT Hub: {}", err),
@@ -91,6 +93,7 @@ impl std::fmt::Display for CreateClientError {
 impl std::error::Error for CreateClientError {
 	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
 		match self {
+			CreateClientError::InvalidDefaultSubscription(err) => Some(err),
 			CreateClientError::ResolveIotHubHostname(Some(err)) => Some(err),
 			CreateClientError::ResolveIotHubHostname(None) => None,
 			CreateClientError::WebSocketUrl(err) => Some(err),
@@ -210,7 +213,7 @@ fn client_new(
 
 	max_back_off: std::time::Duration,
 	keep_alive: std::time::Duration,
-) -> Result<mqtt::Client<crate::IoSource>, crate::CreateClientError> {
+) -> Result<(mqtt::Client<crate::IoSource>, usize), crate::CreateClientError> {
 	let client_id =
 		if let Some(module_id) = &module_id {
 			format!("{}/{}", device_id, module_id)
@@ -284,16 +287,20 @@ fn client_new(
 		);
 	}
 
+	let num_default_subscriptions = default_subscriptions.len();
+
 	for subscribe_to in default_subscriptions {
 		match inner.subscribe(subscribe_to) {
 			Ok(()) => (),
 
-			// The subscription can only fail if `inner` has shut down, which is not the case here
+			// The subscription can only fail with this error if `inner` has shut down, which is not the case here
 			Err(mqtt::UpdateSubscriptionError::ClientDoesNotExist) => unreachable!(),
+
+			Err(err @ mqtt::UpdateSubscriptionError::EncodePacket(..)) => return Err(CreateClientError::InvalidDefaultSubscription(err)),
 		}
 	}
 
-	Ok(inner)
+	Ok((inner, num_default_subscriptions))
 }
 
 lazy_static::lazy_static! {
